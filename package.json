@@ -8,6 +8,9 @@
     "@ffmpeg/util": "^0.12.2",
     "@google/genai": "^1.38.0",
     "@hono/zod-validator": "^0.5.0",
+    "@remotion/bundler": "^4.0.407",
+    "@remotion/player": "^4.0.407",
+    "@remotion/renderer": "^4.0.407",
     "@types/formidable": "^3.4.6",
     "formidable": "^3.5.4",
     "hono": "4.7.7",
@@ -15,6 +18,7 @@
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "react-router": "^7.5.3",
+    "remotion": "^4.0.407",
     "zod": "^3.24.3"
   },
   "devDependencies": {

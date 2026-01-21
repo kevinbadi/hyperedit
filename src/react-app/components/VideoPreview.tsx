@@ -1,5 +1,5 @@
 import { Play, Image as ImageIcon, Layers } from 'lucide-react';
-import { useState, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
+import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from 'react';
 
 interface ClipLayer {
   id: string;
@@ -41,19 +41,21 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 }, ref) => {
   const [hasError, setHasError] = useState(false);
   const [isVideoReady, setIsVideoReady] = useState(false);
-  const [loadedImages, setLoadedImages] = useState<Set<string>>(new Set());
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const lastSeekTime = useRef<number>(0);
+  const seekTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Determine if we're in multi-layer mode
   const isMultiLayerMode = layers.length > 0;
 
   // Get layers sorted by track (V1 first, then V2, V3, etc.)
-  const sortedLayers = [...layers].sort((a, b) => {
-    const orderA = a.trackId === 'V1' ? 0 : a.trackId === 'V2' ? 1 : 2;
-    const orderB = b.trackId === 'V1' ? 0 : b.trackId === 'V2' ? 1 : 2;
-    return orderA - orderB;
-  });
+  const sortedLayers = useMemo(() =>
+    [...layers].sort((a, b) => {
+      const orderA = a.trackId === 'V1' ? 0 : a.trackId === 'V2' ? 1 : 2;
+      const orderB = b.trackId === 'V1' ? 0 : b.trackId === 'V2' ? 1 : 2;
+      return orderA - orderB;
+    }), [layers]);
 
   // Base layer is V1, overlays are V2+
   const baseLayer = sortedLayers.find(l => l.trackId === 'V1');
@@ -64,20 +66,26 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const effectiveType = isMultiLayerMode ? (baseLayer?.type || 'video') : mediaType;
   const effectiveClipTime = isMultiLayerMode ? (baseLayer?.clipTime || 0) : clipTime;
 
+  // Track the current video URL to detect actual source changes
+  const currentUrlRef = useRef<string | null | undefined>(null);
+
   // Expose methods to parent
   useImperativeHandle(ref, () => ({
     seekTo: (time: number) => {
-      if (videoRef.current) {
+      if (videoRef.current && !videoRef.current.seeking) {
         videoRef.current.currentTime = time;
       }
     },
     getVideoElement: () => videoRef.current,
   }));
 
+  // Reset error state when URL actually changes
   useEffect(() => {
-    // Reset state when video URL changes
-    setHasError(false);
-    setIsVideoReady(false);
+    if (effectiveUrl !== currentUrlRef.current) {
+      currentUrlRef.current = effectiveUrl;
+      setHasError(false);
+      setIsVideoReady(false);
+    }
   }, [effectiveUrl]);
 
   // Handle play/pause for base video
@@ -109,22 +117,43 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [isPlaying, overlayLayers]);
 
-  // Sync base video position with timeline
+  // Sync base video position with timeline - debounced to prevent rapid seeking
   useEffect(() => {
     if (!videoRef.current || effectiveType !== 'video' || !isVideoReady) return;
 
     const video = videoRef.current;
-    const timeDiff = Math.abs(video.currentTime - effectiveClipTime);
 
-    if (!isPlaying) {
-      if (timeDiff > 0.05) {
-        video.currentTime = effectiveClipTime;
-      }
-    } else {
-      if (timeDiff > 0.3) {
-        video.currentTime = effectiveClipTime;
-      }
+    // Clear any pending seek
+    if (seekTimeoutRef.current) {
+      clearTimeout(seekTimeoutRef.current);
     }
+
+    // Debounce seeks to prevent overwhelming the video element during clip dragging
+    seekTimeoutRef.current = setTimeout(() => {
+      if (!video || video.seeking) return;
+
+      const timeDiff = Math.abs(video.currentTime - effectiveClipTime);
+
+      if (!isPlaying) {
+        // When paused, seek if time difference is significant
+        if (timeDiff > 0.1) {
+          video.currentTime = effectiveClipTime;
+          lastSeekTime.current = effectiveClipTime;
+        }
+      } else {
+        // When playing, only correct significant drift
+        if (timeDiff > 0.5) {
+          video.currentTime = effectiveClipTime;
+          lastSeekTime.current = effectiveClipTime;
+        }
+      }
+    }, 50); // 50ms debounce
+
+    return () => {
+      if (seekTimeoutRef.current) {
+        clearTimeout(seekTimeoutRef.current);
+      }
+    };
   }, [effectiveClipTime, effectiveType, isVideoReady, isPlaying]);
 
   // Sync overlay video positions
@@ -132,15 +161,15 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     overlayLayers.forEach(layer => {
       if (layer.type !== 'video') return;
       const video = overlayVideoRefs.current.get(layer.id);
-      if (!video) return;
+      if (!video || video.seeking) return;
 
       const timeDiff = Math.abs(video.currentTime - layer.clipTime);
       if (!isPlaying) {
-        if (timeDiff > 0.05) {
+        if (timeDiff > 0.1) {
           video.currentTime = layer.clipTime;
         }
       } else {
-        if (timeDiff > 0.3) {
+        if (timeDiff > 0.5) {
           video.currentTime = layer.clipTime;
         }
       }
@@ -155,13 +184,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
   const handleLoadedMetadata = () => {
     setIsVideoReady(true);
+    // Seek to initial clip time when video loads
     if (videoRef.current && effectiveClipTime > 0) {
       videoRef.current.currentTime = effectiveClipTime;
     }
-  };
-
-  const handleImageLoad = (layerId: string) => {
-    setLoadedImages(prev => new Set(prev).add(layerId));
   };
 
   // Render overlay layer
@@ -192,7 +218,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           alt="Overlay"
           style={style}
           className="rounded-lg shadow-lg"
-          onLoad={() => handleImageLoad(layer.id)}
           onError={() => console.error('Failed to load overlay image:', layer.url)}
         />
       );
@@ -272,17 +297,23 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       {/* Base layer - video or image on V1 */}
       {effectiveUrl && effectiveType === 'video' && (
         <video
-          key={effectiveUrl}
           ref={videoRef}
           src={effectiveUrl}
           className="w-full h-full object-contain"
           controls={false}
           playsInline
+          preload="auto"
           onLoadedMetadata={handleLoadedMetadata}
           onTimeUpdate={handleTimeUpdate}
           onError={(e) => {
             console.error('Video load error:', e);
             setHasError(true);
+          }}
+          onSeeking={() => {
+            // Video is seeking - this is normal during scrubbing
+          }}
+          onSeeked={() => {
+            // Seek complete
           }}
         />
       )}

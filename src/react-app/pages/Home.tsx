@@ -3,11 +3,13 @@ import VideoPreview, { VideoPreviewHandle } from '@/react-app/components/VideoPr
 import Timeline from '@/react-app/components/Timeline';
 import AssetLibrary from '@/react-app/components/AssetLibrary';
 import AIPromptPanel from '@/react-app/components/AIPromptPanel';
+import MotionGraphicsPanel from '@/react-app/components/MotionGraphicsPanel';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
 import { useProject, Asset } from '@/react-app/hooks/useProject';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
-import { Sparkles, ListOrdered, Copy, Check, X, Download, Play } from 'lucide-react';
+import { Sparkles, Wand2, ListOrdered, Copy, Check, X, Download, Play } from 'lucide-react';
+import type { TemplateId } from '@/remotion/templates';
 
 interface ChapterData {
   chapters: Array<{ start: number; title: string }>;
@@ -24,6 +26,7 @@ export default function Home() {
   const [showChapters, setShowChapters] = useState(false);
   const [copied, setCopied] = useState(false);
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
+  const [rightPanelTab, setRightPanelTab] = useState<'ai' | 'motion'>('ai');
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
@@ -103,12 +106,13 @@ export default function Home() {
 
       for (const clip of clipsOnTrack) {
         const asset = assets.find(a => a.id === clip.assetId);
-        if (asset) {
+        const url = asset ? getAssetStreamUrl(asset.id) : null;
+        if (asset && url) {
           // Calculate the time within the clip (accounting for in-point)
           const clipTime = (currentTime - clip.start) + (clip.inPoint || 0);
           layers.push({
             id: clip.id,
-            url: getAssetStreamUrl(asset.id),
+            url,
             type: asset.type,
             trackId: clip.trackId,
             clipTime,
@@ -342,6 +346,52 @@ export default function Home() {
     return data;
   }, [session, assets, addClip, saveProject]);
 
+  // Handle adding motion graphic to timeline
+  const handleAddMotionGraphic = useCallback(async (
+    templateId: TemplateId,
+    props: Record<string, unknown>,
+    duration: number
+  ) => {
+    if (!session) {
+      alert('Please upload a video first to start a session');
+      return;
+    }
+
+    try {
+      // For now, we'll call the server to render the motion graphic
+      // The server will use Remotion to render it to MP4
+      const response = await fetch(`http://localhost:3333/session/${session}/render-motion-graphic`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          templateId,
+          props,
+          duration,
+          fps: 30,
+          width: 1920,
+          height: 1080,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to render motion graphic');
+      }
+
+      const data = await response.json();
+
+      // Add the rendered motion graphic to the timeline at the current playhead position
+      addClip(data.assetId, 'V2', currentTime, duration);
+      await saveProject();
+
+      console.log('Motion graphic added:', data);
+    } catch (error) {
+      console.error('Failed to add motion graphic:', error);
+      // Fallback: just show an alert for now
+      alert(`Motion graphics rendering not yet available on server. Error: ${error instanceof Error ? error.message : 'Unknown'}`);
+    }
+  }, [session, currentTime, addClip, saveProject]);
+
   // Handle render/export
   const handleExport = useCallback(async () => {
     if (clips.length === 0) {
@@ -566,21 +616,58 @@ export default function Home() {
           </ResizableVerticalPanel>
         </div>
 
-        {/* AI Prompt Panel - Resizable */}
+        {/* Right Panel - AI / Motion Graphics */}
         <ResizablePanel
           defaultWidth={320}
           minWidth={280}
           maxWidth={500}
           side="right"
         >
-          <AIPromptPanel
-            onApplyEdit={handleApplyEdit}
-            onExtractKeywordsAndAddGifs={handleExtractKeywordsAndAddGifs}
-            isApplying={isProcessing}
-            applyProgress={0}
-            applyStatus={currentStatus}
-            hasVideo={assets.some(a => a.type === 'video')}
-          />
+          <div className="h-full flex flex-col bg-zinc-900/80 backdrop-blur-sm">
+            {/* Tab switcher */}
+            <div className="flex border-b border-zinc-800/50">
+              <button
+                onClick={() => setRightPanelTab('ai')}
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
+                  rightPanelTab === 'ai'
+                    ? 'text-orange-400 border-b-2 border-orange-400 bg-orange-500/5'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <Sparkles className="w-4 h-4" />
+                AI Edit
+              </button>
+              <button
+                onClick={() => setRightPanelTab('motion')}
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
+                  rightPanelTab === 'motion'
+                    ? 'text-purple-400 border-b-2 border-purple-400 bg-purple-500/5'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <Wand2 className="w-4 h-4" />
+                Motion
+              </button>
+            </div>
+
+            {/* Panel content */}
+            <div className="flex-1 overflow-hidden">
+              {rightPanelTab === 'ai' ? (
+                <AIPromptPanel
+                  onApplyEdit={handleApplyEdit}
+                  onExtractKeywordsAndAddGifs={handleExtractKeywordsAndAddGifs}
+                  isApplying={isProcessing}
+                  applyProgress={0}
+                  applyStatus={currentStatus}
+                  hasVideo={assets.some(a => a.type === 'video')}
+                />
+              ) : (
+                <MotionGraphicsPanel
+                  onAddToTimeline={handleAddMotionGraphic}
+                />
+              )}
+            </div>
+          </div>
         </ResizablePanel>
       </div>
     </div>

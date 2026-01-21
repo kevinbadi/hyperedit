@@ -2238,6 +2238,106 @@ async function handleTranscribeAndExtract(req, res, sessionId) {
   }
 }
 
+// ============== MOTION GRAPHICS RENDERING ==============
+
+// Handle motion graphics rendering
+// NOTE: This is a placeholder that creates a simple text overlay video using FFmpeg
+// For proper Remotion rendering, you'd need to set up @remotion/renderer with bundling
+async function handleRenderMotionGraphic(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    const body = await parseBody(req);
+    const { templateId, props, duration, fps = 30, width = 1920, height = 1080 } = body;
+
+    const jobId = randomUUID();
+    const assetId = randomUUID();
+    const outputPath = join(session.assetsDir, `${assetId}.mp4`);
+    const thumbPath = join(session.assetsDir, `${assetId}_thumb.jpg`);
+
+    console.log(`\n[${jobId}] === RENDER MOTION GRAPHIC ===`);
+    console.log(`[${jobId}] Template: ${templateId}`);
+    console.log(`[${jobId}] Duration: ${duration}s`);
+
+    // Get text and styling from props
+    const text = props.text || props.name || templateId;
+    const color = (props.color || props.primaryColor || '#ffffff').replace('#', '');
+    const bgColor = props.backgroundColor || '000000';
+    const fontSize = props.fontSize || 64;
+
+    // Create a video with text overlay using FFmpeg
+    // This is a placeholder - proper Remotion rendering would generate much nicer animations
+    const fontFile = '/System/Library/Fonts/Helvetica.ttc'; // macOS system font
+
+    // FFmpeg command to create a video with text
+    const ffmpegArgs = [
+      '-y',
+      '-f', 'lavfi',
+      '-i', `color=c=0x${bgColor}:s=${width}x${height}:d=${duration}:r=${fps}`,
+      '-vf', `drawtext=text='${text.replace(/'/g, "\\'")}':fontfile=${fontFile}:fontsize=${fontSize}:fontcolor=0x${color}:x=(w-text_w)/2:y=(h-text_h)/2`,
+      '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      '-preset', 'fast',
+      outputPath
+    ];
+
+    await runFFmpeg(ffmpegArgs, jobId);
+
+    // Generate thumbnail
+    await runFFmpeg([
+      '-y', '-i', outputPath,
+      '-vf', 'scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2',
+      '-frames:v', '1',
+      thumbPath
+    ], jobId);
+
+    const { stat } = await import('fs/promises');
+    const stats = await stat(outputPath);
+
+    // Create asset entry
+    const asset = {
+      id: assetId,
+      type: 'video',
+      filename: `motion-${templateId}-${Date.now()}.mp4`,
+      path: outputPath,
+      thumbPath: existsSync(thumbPath) ? thumbPath : null,
+      duration: duration,
+      size: stats.size,
+      width,
+      height,
+      createdAt: Date.now(),
+      // Metadata
+      templateId,
+      props,
+    };
+
+    session.assets.set(assetId, asset);
+
+    console.log(`[${jobId}] Motion graphic rendered: ${assetId}`);
+    console.log(`[${jobId}] === RENDER COMPLETE ===\n`);
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({
+      success: true,
+      assetId,
+      filename: asset.filename,
+      duration,
+      thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
+      streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
+    }));
+
+  } catch (error) {
+    console.error('Motion graphic render error:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
 // ============== SERVER ==============
 
 const server = http.createServer(async (req, res) => {
@@ -2318,6 +2418,10 @@ const server = http.createServer(async (req, res) => {
     // Transcription and keyword extraction
     else if (req.method === 'POST' && action === 'transcribe-and-extract') {
       await handleTranscribeAndExtract(req, res, sessionId);
+    }
+    // Motion graphics rendering (placeholder - creates solid color video for now)
+    else if (req.method === 'POST' && action === 'render-motion-graphic') {
+      await handleRenderMotionGraphic(req, res, sessionId);
     } else if (action.startsWith('renders/')) {
       const renderType = action.substring(8); // Remove 'renders/'
       if (req.method === 'GET') {
