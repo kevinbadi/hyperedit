@@ -1,8 +1,6 @@
-import { useRef, useCallback, useState } from 'react';
-import { Film, Image, Music, Upload, Trash2, Plus, Sparkles } from 'lucide-react';
+import { useRef, useCallback } from 'react';
+import { Film, Image, Music, Upload, Trash2, Plus } from 'lucide-react';
 import type { Asset } from '@/react-app/hooks/useProject';
-
-type GifEffect = 'pulse' | 'zoom' | 'rotate' | 'bounce' | 'fade' | 'shake';
 
 interface AssetLibraryProps {
   assets: Asset[];
@@ -10,7 +8,6 @@ interface AssetLibraryProps {
   onDelete: (assetId: string) => void;
   onDragStart: (asset: Asset) => void;
   onSelect?: (assetId: string | null) => void;
-  onCreateGif?: (assetId: string, effect: GifEffect) => Promise<void>;
   selectedAssetId?: string | null;
   uploading?: boolean;
 }
@@ -52,7 +49,6 @@ export default function AssetLibrary({
   onDelete,
   onDragStart,
   onSelect,
-  onCreateGif,
   selectedAssetId,
   uploading = false,
 }: AssetLibraryProps) {
@@ -139,7 +135,6 @@ export default function AssetLibrary({
                 onSelect={() => onSelect?.(selectedAssetId === asset.id ? null : asset.id)}
                 onDelete={() => onDelete(asset.id)}
                 onDragStart={() => onDragStart(asset)}
-                onCreateGif={onCreateGif ? (effect) => onCreateGif(asset.id, effect) : undefined}
               />
             ))}
 
@@ -171,21 +166,9 @@ interface AssetCardProps {
   onSelect?: () => void;
   onDelete: () => void;
   onDragStart: () => void;
-  onCreateGif?: (effect: GifEffect) => Promise<void>;
 }
 
-const GIF_EFFECTS: { value: GifEffect; label: string; desc: string }[] = [
-  { value: 'pulse', label: 'Pulse', desc: 'Breathing scale effect' },
-  { value: 'zoom', label: 'Zoom', desc: 'Ken Burns zoom in' },
-  { value: 'rotate', label: 'Rotate', desc: 'Gentle rotation' },
-  { value: 'bounce', label: 'Bounce', desc: 'Up and down motion' },
-  { value: 'fade', label: 'Fade', desc: 'Fade in and out' },
-  { value: 'shake', label: 'Shake', desc: 'Vibrate effect' },
-];
-
-function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart, onCreateGif }: AssetCardProps) {
-  const [showGifMenu, setShowGifMenu] = useState(false);
-  const [isCreating, setIsCreating] = useState(false);
+function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart }: AssetCardProps) {
   const Icon = getAssetIcon(asset.type);
   const colorClass = getAssetColor(asset.type);
 
@@ -200,25 +183,6 @@ function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart, onCreat
     if ((e.target as HTMLElement).closest('button')) return;
     onSelect?.();
   }, [onSelect]);
-
-  const handleCreateGif = async (effect: GifEffect) => {
-    if (!onCreateGif) return;
-    setIsCreating(true);
-    setShowGifMenu(false);
-    try {
-      await onCreateGif(effect);
-    } catch (error) {
-      console.error('GIF creation failed:', error);
-      alert(`Failed to create GIF: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    } finally {
-      setIsCreating(false);
-    }
-  };
-
-  // Check if this is an image that can be animated (not already a GIF)
-  const canCreateGif = asset.type === 'image' &&
-    !asset.filename.toLowerCase().endsWith('.gif') &&
-    onCreateGif;
 
   return (
     <div
@@ -245,16 +209,6 @@ function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart, onCreat
         </div>
       )}
 
-      {/* Creating GIF overlay */}
-      {isCreating && (
-        <div className="absolute inset-0 bg-black/70 flex items-center justify-center z-20">
-          <div className="text-center">
-            <div className="animate-spin w-6 h-6 border-2 border-orange-500 border-t-transparent rounded-full mx-auto mb-2" />
-            <span className="text-[10px] text-white">Creating GIF...</span>
-          </div>
-        </div>
-      )}
-
       {/* Type badge */}
       <div className={`absolute top-1 left-1 px-1.5 py-0.5 rounded bg-gradient-to-r ${colorClass} text-[9px] font-medium uppercase`}>
         {asset.type}
@@ -272,44 +226,6 @@ function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart, onCreat
 
       {/* Action buttons */}
       <div className="absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        {/* Create GIF button (only for static images) */}
-        {canCreateGif && (
-          <div className="relative">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowGifMenu(!showGifMenu);
-              }}
-              className="p-1 bg-purple-500/80 hover:bg-purple-500 rounded"
-              title="Create animated GIF"
-            >
-              <Sparkles className="w-3 h-3" />
-            </button>
-
-            {/* GIF effect menu */}
-            {showGifMenu && (
-              <div
-                className="absolute top-full right-0 mt-1 bg-zinc-800 rounded-lg shadow-xl border border-zinc-700 py-1 z-30 min-w-[120px]"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="px-2 py-1 text-[10px] text-zinc-400 font-medium border-b border-zinc-700">
-                  Animation Effect
-                </div>
-                {GIF_EFFECTS.map((effect) => (
-                  <button
-                    key={effect.value}
-                    onClick={() => handleCreateGif(effect.value)}
-                    className="w-full px-2 py-1.5 text-left hover:bg-zinc-700 transition-colors"
-                  >
-                    <div className="text-[11px] text-white">{effect.label}</div>
-                    <div className="text-[9px] text-zinc-500">{effect.desc}</div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
         {/* Delete button */}
         <button
           onClick={(e) => {
@@ -322,14 +238,6 @@ function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart, onCreat
           <Trash2 className="w-3 h-3" />
         </button>
       </div>
-
-      {/* Click outside to close GIF menu */}
-      {showGifMenu && (
-        <div
-          className="fixed inset-0 z-20"
-          onClick={() => setShowGifMenu(false)}
-        />
-      )}
     </div>
   );
 }

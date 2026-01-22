@@ -27,7 +27,12 @@ export interface TimelineClip {
     x?: number;
     y?: number;
     scale?: number;
+    rotation?: number;
     opacity?: number;
+    cropTop?: number;
+    cropBottom?: number;
+    cropLeft?: number;
+    cropRight?: number;
   };
 }
 
@@ -63,9 +68,9 @@ export function useProject() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [tracks, setTracks] = useState<Track[]>([
-    { id: 'V1', type: 'video', name: 'V1', order: 0 },
-    { id: 'V2', type: 'video', name: 'V2', order: 1 },
-    { id: 'A1', type: 'audio', name: 'A1', order: 2 },
+    { id: 'V2', type: 'video', name: 'V2', order: 0 },  // Overlay track (top)
+    { id: 'V1', type: 'video', name: 'V1', order: 1 },  // Base track (below overlay)
+    { id: 'A1', type: 'audio', name: 'A1', order: 2 },  // Audio track (bottom)
   ]);
   const [clips, setClips] = useState<TimelineClip[]>([]);
   const [settings, setSettings] = useState<ProjectSettings>({
@@ -205,7 +210,9 @@ export function useProject() {
     const asset = assets.find(a => a.id === assetId);
     if (!asset) throw new Error('Asset not found');
 
-    const clipDuration = duration ?? asset.duration;
+    // For images, use provided duration or default to 5 seconds
+    // For video/audio, use asset duration
+    const clipDuration = duration ?? (asset.type === 'image' ? 5 : asset.duration);
     const clip: TimelineClip = {
       id: crypto.randomUUID(),
       assetId,
@@ -213,7 +220,7 @@ export function useProject() {
       start,
       duration: clipDuration,
       inPoint: inPoint ?? 0,
-      outPoint: outPoint ?? asset.duration,
+      outPoint: outPoint ?? clipDuration,
     };
 
     setClips(prev => [...prev, clip]);
@@ -257,6 +264,50 @@ export function useProject() {
       };
     }));
   }, []);
+
+  // Split clip at a specific time, creating two clips
+  const splitClip = useCallback((clipId: string, splitTime: number): string | null => {
+    const clip = clips.find(c => c.id === clipId);
+    if (!clip) return null;
+
+    // Calculate the time within the clip where the split occurs
+    const timeInClip = splitTime - clip.start;
+
+    // Validate: split must be within the clip's duration (with small buffer)
+    if (timeInClip <= 0.05 || timeInClip >= clip.duration - 0.05) {
+      return null; // Split too close to edge
+    }
+
+    // Calculate the in-point offset for the split
+    const splitInPoint = clip.inPoint + timeInClip;
+
+    // Create the second clip (after the split)
+    const secondClip: TimelineClip = {
+      id: crypto.randomUUID(),
+      assetId: clip.assetId,
+      trackId: clip.trackId,
+      start: splitTime,
+      duration: clip.duration - timeInClip,
+      inPoint: splitInPoint,
+      outPoint: clip.outPoint,
+      transform: clip.transform ? { ...clip.transform } : undefined,
+    };
+
+    // Update the first clip (before the split) and add the second clip
+    setClips(prev => [
+      ...prev.map(c => {
+        if (c.id !== clipId) return c;
+        return {
+          ...c,
+          duration: timeInClip,
+          outPoint: splitInPoint,
+        };
+      }),
+      secondClip,
+    ]);
+
+    return secondClip.id;
+  }, [clips]);
 
   // Save project to server (debounced)
   const saveProject = useCallback(async (): Promise<void> => {
@@ -446,6 +497,7 @@ export function useProject() {
     deleteClip,
     moveClip,
     resizeClip,
+    splitClip,
 
     // Project
     saveProject,

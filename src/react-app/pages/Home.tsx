@@ -1,12 +1,13 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import VideoPreview, { VideoPreviewHandle } from '@/react-app/components/VideoPreview';
 import Timeline from '@/react-app/components/Timeline';
 import AssetLibrary from '@/react-app/components/AssetLibrary';
+import ClipPropertiesPanel from '@/react-app/components/ClipPropertiesPanel';
 import AIPromptPanel from '@/react-app/components/AIPromptPanel';
 import MotionGraphicsPanel from '@/react-app/components/MotionGraphicsPanel';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
-import { useProject, Asset } from '@/react-app/hooks/useProject';
+import { useProject, Asset, TimelineClip } from '@/react-app/hooks/useProject';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
 import { Sparkles, Wand2, ListOrdered, Copy, Check, X, Download, Play } from 'lucide-react';
 import type { TemplateId } from '@/remotion/templates';
@@ -49,6 +50,7 @@ export default function Home() {
     updateClip,
     deleteClip,
     moveClip,
+    splitClip,
     saveProject,
     renderProject,
     getDuration,
@@ -91,7 +93,8 @@ export default function Home() {
       type: 'video' | 'image' | 'audio';
       trackId: string;
       clipTime: number;
-      transform?: { x?: number; y?: number; scale?: number; opacity?: number };
+      clipStart: number;
+      transform?: TimelineClip['transform'];
     }> = [];
 
     // Check video tracks (V1, V2, V3...)
@@ -116,6 +119,7 @@ export default function Home() {
             type: asset.type,
             trackId: clip.trackId,
             clipTime,
+            clipStart: clip.start,
             transform: clip.transform,
           });
         }
@@ -201,9 +205,13 @@ export default function Home() {
     // Asset drag is handled by the browser's native drag-drop
   }, []);
 
-  // Handle asset selection
+  // Handle asset selection (from library)
   const handleAssetSelect = useCallback((assetId: string | null) => {
     setSelectedAssetId(assetId);
+    // When selecting from library, preview that asset
+    setPreviewAssetId(assetId);
+    // Clear timeline clip selection
+    setSelectedClipId(null);
   }, []);
 
   // Handle dropping asset onto timeline
@@ -220,7 +228,9 @@ export default function Home() {
       targetTrackId = 'V1';
     }
 
-    addClip(asset.id, targetTrackId, time);
+    // Images need a default duration (5 seconds) since they don't have inherent duration
+    const clipDuration = asset.type === 'image' ? 5 : undefined;
+    addClip(asset.id, targetTrackId, time, clipDuration);
     saveProject();
   }, [addClip, saveProject]);
 
@@ -251,21 +261,73 @@ export default function Home() {
     }
   }, [deleteClip, selectedClipId]);
 
+  // Handle cutting clips at the playhead position
+  const handleCutAtPlayhead = useCallback(() => {
+    // Find all clips that are under the playhead
+    const clipsAtPlayhead = clips.filter(clip =>
+      currentTime > clip.start && currentTime < clip.start + clip.duration
+    );
+
+    if (clipsAtPlayhead.length === 0) {
+      return; // No clips to cut
+    }
+
+    // Split each clip at the playhead
+    for (const clip of clipsAtPlayhead) {
+      splitClip(clip.id, currentTime);
+    }
+
+    saveProject();
+  }, [clips, currentTime, splitClip, saveProject]);
+
   // Handle selecting clip
   const handleSelectClip = useCallback((clipId: string | null) => {
     setSelectedClipId(clipId);
+    // Clear asset preview mode - let timeline-based preview take over
+    setPreviewAssetId(null);
 
-    // If a clip is selected, preview its asset
+    // If a clip is selected, move playhead to clip start
     if (clipId) {
       const clip = clips.find(c => c.id === clipId);
       if (clip) {
-        setPreviewAssetId(clip.assetId);
-        // Seek to clip's in point
-        const seekTime = clip.inPoint;
-        videoPreviewRef.current?.seekTo(seekTime);
+        setCurrentTime(clip.start);
       }
     }
   }, [clips]);
+
+  // Handle updating clip transform (scale, rotation, crop, etc.)
+  const handleUpdateClipTransform = useCallback((clipId: string, transform: TimelineClip['transform']) => {
+    updateClip(clipId, { transform });
+    saveProject();
+  }, [updateClip, saveProject]);
+
+  // Get selected clip and its asset
+  const selectedClip = useMemo(() =>
+    clips.find(c => c.id === selectedClipId) || null,
+    [clips, selectedClipId]
+  );
+
+  const selectedClipAsset = useMemo(() =>
+    selectedClip ? assets.find(a => a.id === selectedClip.assetId) || null : null,
+    [selectedClip, assets]
+  );
+
+  // Handle dragging overlay in video preview
+  const handleLayerMove = useCallback((layerId: string, x: number, y: number) => {
+    const clip = clips.find(c => c.id === layerId);
+    if (!clip) return;
+
+    const currentTransform = clip.transform || {};
+    updateClip(layerId, {
+      transform: { ...currentTransform, x, y }
+    });
+  }, [clips, updateClip]);
+
+  // Handle selecting layer from video preview
+  const handleLayerSelect = useCallback((layerId: string) => {
+    setSelectedClipId(layerId);
+    setPreviewAssetId(null);
+  }, []);
 
   // Handle AI edit (using legacy single-video processing)
   const handleApplyEdit = useCallback(async (command: string) => {
@@ -539,25 +601,39 @@ export default function Home() {
       )}
 
       <div className="flex flex-1 min-h-0">
-        {/* Asset Library (Left Panel - Resizable) */}
+        {/* Left Panel - Assets & Clip Properties */}
         <ResizablePanel
-          defaultWidth={192}
-          minWidth={120}
+          defaultWidth={220}
+          minWidth={180}
           maxWidth={400}
           side="left"
         >
-          <AssetLibrary
-            assets={assets}
-            onUpload={handleAssetUpload}
-            onDelete={deleteAsset}
-            onDragStart={handleAssetDragStart}
-            onSelect={handleAssetSelect}
-            onCreateGif={async (assetId, effect) => {
-              await createGif(assetId, { effect });
-            }}
-            selectedAssetId={selectedAssetId}
-            uploading={loading}
-          />
+          <div className="flex flex-col h-full">
+            {/* Asset Library */}
+            <div className={`${selectedClipId ? 'h-1/2' : 'h-full'} overflow-hidden`}>
+              <AssetLibrary
+                assets={assets}
+                onUpload={handleAssetUpload}
+                onDelete={deleteAsset}
+                onDragStart={handleAssetDragStart}
+                onSelect={handleAssetSelect}
+                selectedAssetId={selectedAssetId}
+                uploading={loading}
+              />
+            </div>
+
+            {/* Clip Properties Panel (shown when clip is selected) */}
+            {selectedClipId && (
+              <div className="h-1/2 border-t border-zinc-800/50 bg-zinc-900/50 overflow-hidden">
+                <ClipPropertiesPanel
+                  clip={selectedClip}
+                  asset={selectedClipAsset}
+                  onUpdateTransform={handleUpdateClipTransform}
+                  onClose={() => setSelectedClipId(null)}
+                />
+              </div>
+            )}
+          </div>
         </ResizablePanel>
 
         {/* Main Editor Area */}
@@ -569,6 +645,9 @@ export default function Home() {
                 ref={videoPreviewRef}
                 layers={previewLayers}
                 isPlaying={isPlaying && !previewAssetId}
+                onLayerMove={handleLayerMove}
+                onLayerSelect={handleLayerSelect}
+                selectedLayerId={selectedClipId}
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip
@@ -610,6 +689,7 @@ export default function Home() {
               onMoveClip={handleMoveClip}
               onResizeClip={handleResizeClip}
               onDeleteClip={handleDeleteClip}
+              onCutAtPlayhead={handleCutAtPlayhead}
               onDropAsset={handleDropAsset}
               onSave={saveProject}
             />

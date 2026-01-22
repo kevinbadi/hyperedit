@@ -1,5 +1,5 @@
-import { useState, useRef, useCallback, useMemo } from 'react';
-import { ZoomIn, ZoomOut, Play, Pause, SkipBack } from 'lucide-react';
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
+import { ZoomIn, ZoomOut, Play, Pause, SkipBack, Scissors, Trash2 } from 'lucide-react';
 import TimelineClip from './TimelineClip';
 import type { Track, TimelineClip as TimelineClipType, Asset } from '@/react-app/hooks/useProject';
 
@@ -18,6 +18,7 @@ interface TimelineProps {
   onMoveClip: (clipId: string, newStart: number, newTrackId?: string) => void;
   onResizeClip: (clipId: string, newInPoint: number, newOutPoint: number, newStart?: number) => void;
   onDeleteClip: (clipId: string) => void;
+  onCutAtPlayhead: () => void;
   onDropAsset: (asset: Asset, trackId: string, time: number) => void;
   onSave: () => void;
 }
@@ -48,6 +49,7 @@ export default function Timeline({
   onMoveClip,
   onResizeClip,
   onDeleteClip,
+  onCutAtPlayhead,
   onDropAsset,
   onSave,
 }: TimelineProps) {
@@ -57,6 +59,24 @@ export default function Timeline({
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const tracksContainerRef = useRef<HTMLDivElement>(null);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Delete selected clip with Delete or Backspace key
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipId) {
+        // Don't trigger if user is typing in an input
+        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+          return;
+        }
+        e.preventDefault();
+        onDeleteClip(selectedClipId);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedClipId, onDeleteClip]);
 
   // Calculate display properties
   const totalDuration = Math.max(duration, 10);
@@ -201,6 +221,25 @@ export default function Timeline({
               ) : (
                 <Play className="w-3.5 h-3.5" />
               )}
+            </button>
+          </div>
+
+          {/* Editing tools */}
+          <div className="flex items-center gap-1 border-l border-zinc-700 pl-3 ml-1">
+            <button
+              onClick={onCutAtPlayhead}
+              className="p-1.5 bg-zinc-700 hover:bg-zinc-600 rounded transition-colors"
+              title="Cut at playhead (split clip)"
+            >
+              <Scissors className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => selectedClipId && onDeleteClip(selectedClipId)}
+              disabled={!selectedClipId}
+              className="p-1.5 bg-zinc-700 hover:bg-red-600 disabled:opacity-40 disabled:hover:bg-zinc-700 rounded transition-colors"
+              title="Delete selected clip (Delete key)"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
             </button>
           </div>
 

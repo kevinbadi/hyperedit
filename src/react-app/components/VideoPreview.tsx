@@ -1,29 +1,33 @@
-import { Play, Image as ImageIcon, Layers } from 'lucide-react';
-import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useMemo } from 'react';
+import { Play, Image as ImageIcon, Layers, Move } from 'lucide-react';
+import { useRef, useEffect, forwardRef, useImperativeHandle, useMemo, useState, useCallback } from 'react';
+
+interface ClipTransform {
+  x?: number;
+  y?: number;
+  scale?: number;
+  rotation?: number;
+  opacity?: number;
+  cropTop?: number;
+  cropBottom?: number;
+  cropLeft?: number;
+  cropRight?: number;
+}
 
 interface ClipLayer {
   id: string;
   url: string;
   type: 'video' | 'image' | 'audio';
   trackId: string;
-  clipTime: number; // Time within the clip to seek to
-  transform?: {
-    x?: number;
-    y?: number;
-    scale?: number;
-    opacity?: number;
-  };
+  clipTime: number;
+  transform?: ClipTransform;
 }
 
 interface VideoPreviewProps {
-  // Legacy single-asset mode
-  videoUrl?: string;
-  mediaType?: 'video' | 'image' | 'audio';
-  clipTime?: number;
-  // New multi-layer mode
   layers?: ClipLayer[];
   isPlaying?: boolean;
-  onTimeUpdate?: (time: number) => void;
+  onLayerMove?: (layerId: string, x: number, y: number) => void;
+  onLayerSelect?: (layerId: string) => void;
+  selectedLayerId?: string | null;
 }
 
 export interface VideoPreviewHandle {
@@ -31,230 +35,154 @@ export interface VideoPreviewHandle {
   getVideoElement: () => HTMLVideoElement | null;
 }
 
+// Helper to build CSS styles from transform
+function getTransformStyles(transform?: ClipTransform, zIndex: number = 0, isDragging?: boolean): React.CSSProperties {
+  const t = transform || {};
+
+  const transforms: string[] = [];
+
+  // Position (translate)
+  if (t.x || t.y) {
+    transforms.push(`translate(${t.x || 0}px, ${t.y || 0}px)`);
+  }
+
+  // Scale
+  if (t.scale && t.scale !== 1) {
+    transforms.push(`scale(${t.scale})`);
+  }
+
+  // Rotation
+  if (t.rotation) {
+    transforms.push(`rotate(${t.rotation}deg)`);
+  }
+
+  // Crop using clip-path
+  const cropTop = t.cropTop || 0;
+  const cropBottom = t.cropBottom || 0;
+  const cropLeft = t.cropLeft || 0;
+  const cropRight = t.cropRight || 0;
+  const hasClip = cropTop || cropBottom || cropLeft || cropRight;
+
+  return {
+    zIndex,
+    transform: transforms.length > 0 ? transforms.join(' ') : undefined,
+    opacity: t.opacity ?? 1,
+    clipPath: hasClip
+      ? `inset(${cropTop}% ${cropRight}% ${cropBottom}% ${cropLeft}%)`
+      : undefined,
+    cursor: isDragging ? 'grabbing' : undefined,
+  };
+}
+
 const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
-  videoUrl,
-  mediaType = 'video',
-  clipTime = 0,
   layers = [],
   isPlaying = false,
-  onTimeUpdate
+  onLayerMove,
+  onLayerSelect,
+  selectedLayerId,
 }, ref) => {
-  const [hasError, setHasError] = useState(false);
-  const [isVideoReady, setIsVideoReady] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const lastSeekTime = useRef<number>(0);
-  const seekTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
+  const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
 
-  // Determine if we're in multi-layer mode
-  const isMultiLayerMode = layers.length > 0;
+  // Find the base video layer (V1) for audio/playback control
+  const baseVideoLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
 
-  // Get layers sorted by track (V1 first, then V2, V3, etc.)
+  // Get all layers sorted by track (V1 first, then V2, etc.) for rendering
   const sortedLayers = useMemo(() =>
-    [...layers].sort((a, b) => {
-      const orderA = a.trackId === 'V1' ? 0 : a.trackId === 'V2' ? 1 : 2;
-      const orderB = b.trackId === 'V1' ? 0 : b.trackId === 'V2' ? 1 : 2;
-      return orderA - orderB;
-    }), [layers]);
+    [...layers].sort((a, b) => a.trackId.localeCompare(b.trackId)),
+    [layers]
+  );
 
-  // Base layer is V1, overlays are V2+
-  const baseLayer = sortedLayers.find(l => l.trackId === 'V1');
-  const overlayLayers = sortedLayers.filter(l => l.trackId !== 'V1');
-
-  // For legacy single-asset mode
-  const effectiveUrl = isMultiLayerMode ? baseLayer?.url : videoUrl;
-  const effectiveType = isMultiLayerMode ? (baseLayer?.type || 'video') : mediaType;
-  const effectiveClipTime = isMultiLayerMode ? (baseLayer?.clipTime || 0) : clipTime;
-
-  // Track the current video URL to detect actual source changes
-  const currentUrlRef = useRef<string | null | undefined>(null);
-
-  // Expose methods to parent
   useImperativeHandle(ref, () => ({
     seekTo: (time: number) => {
-      if (videoRef.current && !videoRef.current.seeking) {
-        videoRef.current.currentTime = time;
-      }
+      if (videoRef.current) videoRef.current.currentTime = time;
     },
     getVideoElement: () => videoRef.current,
   }));
 
-  // Reset error state when URL actually changes
+  // Seek control for base video
   useEffect(() => {
-    if (effectiveUrl !== currentUrlRef.current) {
-      currentUrlRef.current = effectiveUrl;
-      setHasError(false);
-      setIsVideoReady(false);
-    }
-  }, [effectiveUrl]);
+    const video = videoRef.current;
+    if (!video || !baseVideoLayer) return;
+    if (isPlaying) return;
 
-  // Handle play/pause for base video
+    const target = baseVideoLayer.clipTime;
+    if (Math.abs(video.currentTime - target) > 0.1) {
+      video.currentTime = target;
+    }
+  }, [baseVideoLayer?.clipTime, isPlaying]);
+
+  // Play/pause control for base video
   useEffect(() => {
-    if (!videoRef.current || effectiveType !== 'video' || !isVideoReady) return;
+    const video = videoRef.current;
+    if (!video || !baseVideoLayer) return;
 
     if (isPlaying) {
-      videoRef.current.play().catch(err => {
-        console.error('Failed to play video:', err);
-      });
+      video.play().catch(() => {});
     } else {
-      videoRef.current.pause();
+      video.pause();
     }
-  }, [isPlaying, effectiveType, isVideoReady]);
+  }, [isPlaying, baseVideoLayer]);
 
-  // Handle play/pause for overlay videos
-  useEffect(() => {
-    overlayVideoRefs.current.forEach((video, layerId) => {
-      const layer = overlayLayers.find(l => l.id === layerId);
-      if (!layer || layer.type !== 'video') return;
+  // Seek on load
+  const handleLoaded = () => {
+    if (videoRef.current && baseVideoLayer) {
+      videoRef.current.currentTime = baseVideoLayer.clipTime;
+    }
+  };
 
-      if (isPlaying) {
-        video.play().catch(err => {
-          console.error('Failed to play overlay video:', err);
-        });
-      } else {
-        video.pause();
-      }
+  // Handle mouse down on draggable layer
+  const handleLayerMouseDown = useCallback((e: React.MouseEvent, layer: ClipLayer) => {
+    // Only allow dragging non-V1 layers (overlays)
+    if (layer.trackId === 'V1') return;
+    if (e.button !== 0) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    setDraggingLayer(layer.id);
+    setDragStart({
+      x: e.clientX,
+      y: e.clientY,
+      layerX: layer.transform?.x || 0,
+      layerY: layer.transform?.y || 0,
     });
-  }, [isPlaying, overlayLayers]);
 
-  // Sync base video position with timeline - debounced to prevent rapid seeking
+    // Select this layer
+    onLayerSelect?.(layer.id);
+  }, [onLayerSelect]);
+
+  // Handle mouse move for dragging
   useEffect(() => {
-    if (!videoRef.current || effectiveType !== 'video' || !isVideoReady) return;
+    if (!draggingLayer || !dragStart) return;
 
-    const video = videoRef.current;
+    const handleMouseMove = (e: MouseEvent) => {
+      const deltaX = e.clientX - dragStart.x;
+      const deltaY = e.clientY - dragStart.y;
 
-    // Clear any pending seek
-    if (seekTimeoutRef.current) {
-      clearTimeout(seekTimeoutRef.current);
-    }
+      const newX = dragStart.layerX + deltaX;
+      const newY = dragStart.layerY + deltaY;
 
-    // Debounce seeks to prevent overwhelming the video element during clip dragging
-    seekTimeoutRef.current = setTimeout(() => {
-      if (!video || video.seeking) return;
+      onLayerMove?.(draggingLayer, newX, newY);
+    };
 
-      const timeDiff = Math.abs(video.currentTime - effectiveClipTime);
+    const handleMouseUp = () => {
+      setDraggingLayer(null);
+      setDragStart(null);
+    };
 
-      if (!isPlaying) {
-        // When paused, seek if time difference is significant
-        if (timeDiff > 0.1) {
-          video.currentTime = effectiveClipTime;
-          lastSeekTime.current = effectiveClipTime;
-        }
-      } else {
-        // When playing, only correct significant drift
-        if (timeDiff > 0.5) {
-          video.currentTime = effectiveClipTime;
-          lastSeekTime.current = effectiveClipTime;
-        }
-      }
-    }, 50); // 50ms debounce
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
 
     return () => {
-      if (seekTimeoutRef.current) {
-        clearTimeout(seekTimeoutRef.current);
-      }
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [effectiveClipTime, effectiveType, isVideoReady, isPlaying]);
+  }, [draggingLayer, dragStart, onLayerMove]);
 
-  // Sync overlay video positions
-  useEffect(() => {
-    overlayLayers.forEach(layer => {
-      if (layer.type !== 'video') return;
-      const video = overlayVideoRefs.current.get(layer.id);
-      if (!video || video.seeking) return;
-
-      const timeDiff = Math.abs(video.currentTime - layer.clipTime);
-      if (!isPlaying) {
-        if (timeDiff > 0.1) {
-          video.currentTime = layer.clipTime;
-        }
-      } else {
-        if (timeDiff > 0.5) {
-          video.currentTime = layer.clipTime;
-        }
-      }
-    });
-  }, [overlayLayers, isPlaying]);
-
-  const handleTimeUpdate = () => {
-    if (videoRef.current) {
-      onTimeUpdate?.(videoRef.current.currentTime);
-    }
-  };
-
-  const handleLoadedMetadata = () => {
-    setIsVideoReady(true);
-    // Seek to initial clip time when video loads
-    if (videoRef.current && effectiveClipTime > 0) {
-      videoRef.current.currentTime = effectiveClipTime;
-    }
-  };
-
-  // Render overlay layer
-  const renderOverlay = (layer: ClipLayer) => {
-    const transform = layer.transform || {};
-    const scale = transform.scale || 1;
-    const opacity = transform.opacity ?? 1;
-    const x = transform.x ?? 0;
-    const y = transform.y ?? 0;
-
-    const style: React.CSSProperties = {
-      position: 'absolute',
-      opacity,
-      transform: `translate(${x}px, ${y}px) scale(${scale})`,
-      // Position overlays in bottom-right corner by default for GIFs
-      right: layer.type === 'image' ? '20px' : undefined,
-      bottom: layer.type === 'image' ? '60px' : undefined,
-      maxWidth: layer.type === 'image' ? '200px' : '100%',
-      maxHeight: layer.type === 'image' ? '200px' : '100%',
-      zIndex: layer.trackId === 'V2' ? 10 : 20,
-    };
-
-    if (layer.type === 'image') {
-      return (
-        <img
-          key={layer.id}
-          src={layer.url}
-          alt="Overlay"
-          style={style}
-          className="rounded-lg shadow-lg"
-          onError={() => console.error('Failed to load overlay image:', layer.url)}
-        />
-      );
-    }
-
-    if (layer.type === 'video') {
-      return (
-        <video
-          key={layer.id}
-          ref={(el) => {
-            if (el) {
-              overlayVideoRefs.current.set(layer.id, el);
-            } else {
-              overlayVideoRefs.current.delete(layer.id);
-            }
-          }}
-          src={layer.url}
-          style={{ ...style, objectFit: 'contain' }}
-          className="rounded-lg shadow-lg"
-          muted
-          loop
-          playsInline
-          onLoadedMetadata={() => {
-            const video = overlayVideoRefs.current.get(layer.id);
-            if (video && layer.clipTime > 0) {
-              video.currentTime = layer.clipTime;
-            }
-          }}
-        />
-      );
-    }
-
-    return null;
-  };
-
-  // No content to display
-  if (!effectiveUrl && !isMultiLayerMode) {
+  if (layers.length === 0) {
     return (
       <div className="relative w-full max-w-4xl aspect-video bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center">
         <div className="text-center text-zinc-600">
@@ -265,94 +193,91 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     );
   }
 
-  // Image-only mode (no base video, just showing an image)
-  if (effectiveType === 'image' && !overlayLayers.length) {
-    return (
-      <div className="relative w-full max-w-4xl aspect-video bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10">
-        <img
-          src={effectiveUrl}
-          alt="Preview"
-          className="w-full h-full object-contain"
-          onError={() => setHasError(true)}
-        />
-        {hasError && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/80">
-            <div className="text-center p-4">
-              <ImageIcon className="w-12 h-12 text-zinc-600 mx-auto mb-2" />
-              <p className="text-red-400 mb-2">Failed to load image</p>
-            </div>
-          </div>
-        )}
-        <div className="absolute bottom-3 right-3 flex items-center gap-1 text-xs text-white/60 bg-black/50 px-2 py-1 rounded">
-          <ImageIcon className="w-3 h-3" />
-          <span>Image</span>
-        </div>
-      </div>
-    );
-  }
-
-  // Main render with video base and overlays
   return (
-    <div className="relative w-full max-w-4xl aspect-video bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10">
-      {/* Base layer - video or image on V1 */}
-      {effectiveUrl && effectiveType === 'video' && (
-        <video
-          ref={videoRef}
-          src={effectiveUrl}
-          className="w-full h-full object-contain"
-          controls={false}
-          playsInline
-          preload="auto"
-          onLoadedMetadata={handleLoadedMetadata}
-          onTimeUpdate={handleTimeUpdate}
-          onError={(e) => {
-            console.error('Video load error:', e);
-            setHasError(true);
-          }}
-          onSeeking={() => {
-            // Video is seeking - this is normal during scrubbing
-          }}
-          onSeeked={() => {
-            // Seek complete
-          }}
-        />
-      )}
+    <div
+      ref={containerRef}
+      className="relative w-full max-w-4xl aspect-video bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10"
+    >
+      {/* Render all layers in order (V1 at bottom, V2+ on top) */}
+      {sortedLayers.map((layer, index) => {
+        const isBaseVideo = layer.trackId === 'V1' && layer.type === 'video';
+        const isOverlay = layer.trackId !== 'V1';
+        const isDragging = draggingLayer === layer.id;
+        const isSelected = selectedLayerId === layer.id;
+        const styles = getTransformStyles(layer.transform, index + 1, isDragging);
 
-      {effectiveUrl && effectiveType === 'image' && (
-        <img
-          src={effectiveUrl}
-          alt="Base layer"
-          className="w-full h-full object-contain"
-          onError={() => setHasError(true)}
-        />
-      )}
+        if (layer.type === 'video') {
+          return (
+            <video
+              key={layer.id}
+              ref={isBaseVideo ? videoRef : undefined}
+              src={layer.url}
+              className={`absolute inset-0 w-full h-full object-contain ${
+                isOverlay ? 'cursor-grab active:cursor-grabbing' : ''
+              } ${isSelected && isOverlay ? 'ring-2 ring-orange-500 ring-offset-2 ring-offset-black' : ''}`}
+              style={styles}
+              playsInline
+              preload="auto"
+              onLoadedData={isBaseVideo ? handleLoaded : undefined}
+              muted={!isBaseVideo}
+              onMouseDown={isOverlay ? (e) => handleLayerMouseDown(e, layer) : undefined}
+            />
+          );
+        }
 
-      {/* Overlay layers from V2+ */}
-      {overlayLayers.map(renderOverlay)}
+        if (layer.type === 'image') {
+          return (
+            <div
+              key={layer.id}
+              className={`absolute inset-0 w-full h-full ${
+                isOverlay ? 'cursor-grab active:cursor-grabbing' : ''
+              }`}
+              style={{ ...styles, pointerEvents: isOverlay ? 'auto' : 'none' }}
+              onMouseDown={isOverlay ? (e) => handleLayerMouseDown(e, layer) : undefined}
+            >
+              <img
+                src={layer.url}
+                alt="Layer"
+                className="w-full h-full object-contain pointer-events-none"
+                draggable={false}
+              />
+              {/* Selection indicator for overlay images */}
+              {isSelected && isOverlay && (
+                <div className="absolute inset-0 ring-2 ring-orange-500 pointer-events-none" />
+              )}
+              {/* Drag handle indicator */}
+              {isOverlay && !isDragging && (
+                <div className="absolute top-2 right-2 p-1.5 bg-black/60 rounded text-white/70 pointer-events-none">
+                  <Move className="w-3 h-3" />
+                </div>
+              )}
+            </div>
+          );
+        }
 
-      {/* Error state */}
-      {hasError && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/80">
-          <div className="text-center p-4">
-            <p className="text-red-400 mb-2">Failed to load media</p>
-            <p className="text-xs text-zinc-500">Check that the file exists and is accessible</p>
-          </div>
-        </div>
-      )}
+        return null;
+      })}
 
-      {/* Layer indicator */}
-      {overlayLayers.length > 0 && (
-        <div className="absolute top-3 left-3 flex items-center gap-1 text-xs text-white/60 bg-black/50 px-2 py-1 rounded">
+      {/* Layer count indicator */}
+      {layers.length > 1 && (
+        <div className="absolute top-3 left-3 text-xs text-white/60 bg-black/50 px-2 py-1 rounded flex items-center gap-1 z-50">
           <Layers className="w-3 h-3" />
-          <span>{overlayLayers.length + 1} layers</span>
+          <span>{layers.length} layers</span>
         </div>
       )}
 
-      {/* Media type indicator */}
-      <div className="absolute bottom-3 right-3 flex items-center gap-1 text-xs text-white/60 bg-black/50 px-2 py-1 rounded">
-        {effectiveType === 'video' ? <Play className="w-3 h-3" /> : <ImageIcon className="w-3 h-3" />}
-        <span>{effectiveType === 'video' ? 'Video' : 'Image'}</span>
+      {/* Type indicator */}
+      <div className="absolute bottom-3 right-3 text-xs text-white/60 bg-black/50 px-2 py-1 rounded flex items-center gap-1 z-50">
+        {baseVideoLayer ? <Play className="w-3 h-3" /> : <ImageIcon className="w-3 h-3" />}
+        <span>{baseVideoLayer ? 'video' : layers[0]?.type}</span>
       </div>
+
+      {/* Dragging indicator */}
+      {draggingLayer && (
+        <div className="absolute bottom-3 left-3 text-xs text-orange-400 bg-black/70 px-2 py-1 rounded z-50">
+          Dragging...
+        </div>
+      )}
     </div>
   );
 });
