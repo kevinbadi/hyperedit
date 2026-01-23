@@ -29,16 +29,18 @@ src/
 │   ├── components/      # UI: Timeline, VideoPreview, AssetLibrary, AIPromptPanel, MotionGraphicsPanel
 │   ├── hooks/           # useProject (main state), useFFmpeg, useVideoSession
 │   └── pages/Home.tsx   # Main editor layout
-├── worker/index.ts      # Hono backend API (AI editing via Gemini, asset management)
-├── remotion/templates/  # Motion graphics: AnimatedText, LowerThird, CallToAction
-└── shared/types.ts      # Zod schemas shared between client/server
+├── worker/index.ts      # Hono backend API (AI editing via Gemini)
+├── remotion/            # Motion graphics system
+│   └── templates/       # 11 templates with registry in index.ts
+scripts/
+└── local-ffmpeg-server.js  # Session-based FFmpeg server with Whisper transcription
 ```
 
 **Key patterns:**
-- Multi-track timeline with V1 (base video) and V2 (overlay) tracks
-- `useProject()` hook manages all project state: assets, clips, playback, rendering
-- Cloudflare Worker with D1 database and R2 bucket (configured in wrangler.json)
-- FFmpeg runs client-side via @ffmpeg/ffmpeg, with local server fallback for dev
+- Multi-track timeline with 6 tracks: T1 (captions), V3 (top overlay), V2 (overlay), V1 (base video), A1/A2 (audio)
+- `useProject()` hook manages all project state: assets, clips, playback, captions, rendering
+- Local FFmpeg server (port 3333) handles sessions, asset storage, thumbnail generation, rendering, and Whisper-based transcription for captions
+- Cloudflare Worker with D1 database and R2 bucket for production (configured in wrangler.json)
 
 ## TypeScript Configuration
 
@@ -53,7 +55,8 @@ Path alias: `@/` → `./src/`
 
 Motion graphics use Remotion 4.x. When working on templates in `src/remotion/`:
 - Use the `/remotion-best-practices` skill for domain-specific guidance
-- Templates are in `src/remotion/templates/` (AnimatedText, LowerThird, CallToAction)
+- Templates registered in `src/remotion/templates/index.ts` with `MOTION_TEMPLATES` registry containing defaultProps, styles, and categories
+- Template categories: text, engagement, data, branding, mockup, showcase
 - Compositions integrate with the main timeline via `@remotion/player`
 
 ## Environment Variables

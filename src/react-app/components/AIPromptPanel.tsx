@@ -48,6 +48,8 @@ interface ChatMessage {
   // For animation follow-up (edit in new tab)
   animationAssetId?: string;
   animationName?: string;
+  // For in-place animation edits (no "open in tab" button needed)
+  isInPlaceEdit?: boolean;
 }
 
 interface CaptionOptions {
@@ -76,6 +78,7 @@ interface CustomAnimationResult {
 interface ContextualAnimationRequest {
   type: 'intro' | 'outro' | 'transition' | 'highlight';
   description?: string;
+  timeRange?: { start: number; end: number };
 }
 
 // Animation concept returned from analysis (for approval workflow)
@@ -101,6 +104,7 @@ interface AnimationConcept {
   totalDuration: number;
   durationInSeconds: number;
   backgroundColor: string;
+  startTime?: number; // Optional: where to place the animation on timeline
 }
 
 // Clarifying question for tool selection
@@ -119,6 +123,15 @@ interface ClarifyingQuestion {
   };
 }
 
+// Context info for V1 clip in edit tab (for hybrid asset approach)
+interface EditTabV1Context {
+  assetId: string;
+  filename: string;
+  type: 'video' | 'image' | 'audio';
+  duration?: number;
+  aiGenerated?: boolean; // True if this is a Remotion-generated animation
+}
+
 interface AIPromptPanelProps {
   onApplyEdit?: (command: string) => Promise<void>;
   onExtractKeywordsAndAddGifs?: () => Promise<void>;
@@ -127,12 +140,13 @@ interface AIPromptPanelProps {
   onRemoveDeadAir?: () => Promise<{ duration: number; removedDuration: number }>;
   onChapterCuts?: () => Promise<ChapterCutResult>;
   onAddMotionGraphic?: (config: MotionGraphicConfig) => Promise<void>;
-  onCreateCustomAnimation?: (description: string) => Promise<CustomAnimationResult>;
+  onCreateCustomAnimation?: (description: string, startTime?: number, endTime?: number) => Promise<CustomAnimationResult>;
   onAnalyzeForAnimation?: (request: ContextualAnimationRequest) => Promise<{ concept: AnimationConcept }>;
   onRenderFromConcept?: (concept: AnimationConcept) => Promise<CustomAnimationResult>;
   onCreateContextualAnimation?: (request: ContextualAnimationRequest) => Promise<CustomAnimationResult>;
   onGenerateTranscriptAnimation?: () => Promise<CustomAnimationResult>;
   onOpenAnimationInTab?: (assetId: string, animationName: string) => string | undefined;
+  onEditAnimation?: (assetId: string, editPrompt: string, v1Context?: EditTabV1Context, tabIdToUpdate?: string) => Promise<{ assetId: string; duration: number; sceneCount: number }>;
   isApplying?: boolean;
   applyProgress?: number;
   applyStatus?: string;
@@ -143,6 +157,10 @@ interface AIPromptPanelProps {
   assets?: Asset[];
   currentTime?: number;
   selectedClipId?: string | null;
+  // Edit tab context
+  activeTabId?: string;
+  editTabAssetId?: string;
+  editTabClips?: TimelineClip[]; // Clips in the edit tab's timeline
 }
 
 export default function AIPromptPanel({
@@ -159,6 +177,7 @@ export default function AIPromptPanel({
   onCreateContextualAnimation: _onCreateContextualAnimation,
   onGenerateTranscriptAnimation,
   onOpenAnimationInTab,
+  onEditAnimation,
   isApplying,
   applyProgress,
   applyStatus,
@@ -168,6 +187,9 @@ export default function AIPromptPanel({
   assets = [],
   currentTime = 0,
   selectedClipId,
+  activeTabId = 'main',
+  editTabAssetId,
+  editTabClips = [],
 }: AIPromptPanelProps) {
   const [prompt, setPrompt] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -184,6 +206,7 @@ export default function AIPromptPanel({
   const quickActionsRef = useRef<HTMLDivElement>(null);
   const referencePickerRef = useRef<HTMLDivElement>(null);
   const timeRangePickerRef = useRef<HTMLDivElement>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
   const [captionOptions, setCaptionOptions] = useState<CaptionOptions>({
     highlightColor: '#FFD700',
     fontFamily: 'Inter',
@@ -193,6 +216,29 @@ export default function AIPromptPanel({
 
   // Intentionally unused - kept for backwards compatibility
   void _onCreateContextualAnimation;
+
+  // Compute V1 clip context from edit tab timeline (hybrid approach)
+  // This auto-detects what's on V1 to give the AI context about available clips
+  const editTabV1Context: EditTabV1Context | null = (() => {
+    if (activeTabId === 'main' || !editTabClips || editTabClips.length === 0) {
+      return null;
+    }
+    // Find the first clip on V1 track in the edit tab
+    const v1Clip = editTabClips.find(c => c.trackId === 'V1');
+    if (!v1Clip) return null;
+
+    // Get the asset info for this clip
+    const asset = assets.find(a => a.id === v1Clip.assetId);
+    if (!asset) return null;
+
+    return {
+      assetId: asset.id,
+      filename: asset.filename,
+      type: asset.type,
+      duration: asset.duration,
+      aiGenerated: asset.aiGenerated,
+    };
+  })();
 
   // Close quick actions when clicking outside
   useEffect(() => {
@@ -235,6 +281,11 @@ export default function AIPromptPanel({
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
   }, [showTimeRangePicker]);
+
+  // Auto-scroll to bottom when chat history changes or processing state changes
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatHistory, isProcessing]);
 
   // Helper to format time
   const formatTimeShort = (seconds: number): string => {
@@ -344,107 +395,8 @@ export default function AIPromptPanel({
     { icon: Zap, text: 'Animate transcript' },
   ];
 
-  // Check if prompt is asking for auto-GIF extraction
-  const isAutoGifPrompt = (text: string): boolean => {
-    const lower = text.toLowerCase();
-    return (
-      lower.includes('add gif') ||
-      lower.includes('gif animation') ||
-      lower.includes('extract keyword') ||
-      lower.includes('find keyword') ||
-      lower.includes('auto gif') ||
-      lower.includes('smart gif') ||
-      lower.includes('overlay gif') ||
-      lower.includes('brand gif')
-    );
-  };
-
-  // Check if prompt is asking for captions/subtitles
-  const isCaptionPrompt = (text: string): boolean => {
-    const lower = text.toLowerCase();
-    return (
-      lower.includes('caption') ||
-      lower.includes('subtitle') ||
-      lower.includes('transcribe') ||
-      lower.includes('transcript') ||
-      lower.includes('add text') ||
-      lower.includes('speech to text')
-    );
-  };
-
-  // Check if prompt is asking for B-roll images
-  const isBrollPrompt = (text: string): boolean => {
-    const lower = text.toLowerCase();
-    return (
-      lower.includes('b-roll') ||
-      lower.includes('broll') ||
-      lower.includes('b roll') ||
-      lower.includes('add image') ||
-      lower.includes('generate image') ||
-      lower.includes('ai image') ||
-      lower.includes('visual overlay') ||
-      lower.includes('stock image')
-    );
-  };
-
-  // Check if prompt is asking for chapter-based cuts
-  const isChapterCutPrompt = (text: string): boolean => {
-    const lower = text.toLowerCase();
-    return (
-      (lower.includes('chapter') && (lower.includes('cut') || lower.includes('split'))) ||
-      (lower.includes('review') && lower.includes('chapter') && lower.includes('cut')) ||
-      lower.includes('cut at chapter') ||
-      lower.includes('split by chapter') ||
-      lower.includes('chapter markers') ||
-      lower.includes('auto chapter') ||
-      (lower.includes('identify') && lower.includes('chapter') && lower.includes('cut')) ||
-      (lower.includes('detect') && lower.includes('chapter') && lower.includes('cut')) ||
-      (lower.includes('find') && lower.includes('chapter') && lower.includes('cut'))
-    );
-  };
-
-  // Check if prompt is asking for dead air/silence removal
-  const isDeadAirPrompt = (text: string): boolean => {
-    const lower = text.toLowerCase();
-    return (
-      lower.includes('dead air') ||
-      lower.includes('silence') ||
-      lower.includes('remove pauses') ||
-      lower.includes('cut pauses') ||
-      lower.includes('remove gaps') ||
-      lower.includes('trim silence') ||
-      lower.includes('delete silence') ||
-      (lower.includes('remove') && lower.includes('quiet'))
-    );
-  };
-
-  // Check if prompt is asking for transcript-based animation (kinetic typography)
-  const isTranscriptAnimationPrompt = (text: string): boolean => {
-    const lower = text.toLowerCase();
-    return (
-      // Direct transcript animation requests
-      (lower.includes('animate') && lower.includes('transcript')) ||
-      (lower.includes('animate') && lower.includes('words')) ||
-      (lower.includes('animate') && lower.includes('speech')) ||
-      (lower.includes('animate') && lower.includes('what') && lower.includes('said')) ||
-      // Kinetic typography keywords
-      lower.includes('kinetic typography') ||
-      lower.includes('kinetic text') ||
-      lower.includes('animated words') ||
-      lower.includes('word animation') ||
-      // Show text synced to audio
-      (lower.includes('show') && lower.includes('text') && lower.includes('sync')) ||
-      (lower.includes('text') && lower.includes('sync') && lower.includes('audio')) ||
-      // Transcript visualization
-      (lower.includes('visualize') && lower.includes('transcript')) ||
-      (lower.includes('visualize') && lower.includes('speech')) ||
-      // Animated transcript overlay
-      (lower.includes('animated') && lower.includes('transcript')) ||
-      (lower.includes('transcript') && lower.includes('overlay') && lower.includes('animate'))
-    );
-  };
-
   // Check if prompt is asking for a contextual animation (intro/outro that needs video context)
+  // Note: This is still used by the contextual-animation workflow
   const isContextualAnimationPrompt = (text: string): { isMatch: boolean; type: 'intro' | 'outro' | 'transition' | 'highlight' } => {
     const lower = text.toLowerCase();
 
@@ -526,7 +478,7 @@ export default function AIPromptPanel({
         if (updated[lastIdx]?.isProcessingGifs) {
           updated[lastIdx] = {
             ...updated[lastIdx],
-            text: `📋 **Animation Concept Ready for Review**\n\n**Type:** ${typeLabels[type]}\n**Duration:** ${concept.durationInSeconds.toFixed(1)}s (${concept.totalDuration} frames)\n\n**Video Summary:**\n${concept.contentSummary}\n\n**Key Topics:** ${concept.keyTopics.join(', ') || 'N/A'}\n\n**Proposed Scenes (${concept.scenes.length}):**\n${concept.scenes.map((s, i) => `${i + 1}. **${s.type}** (${(s.duration / 30).toFixed(1)}s): ${s.content.title || s.content.items?.map(item => item.label).join(', ') || 'Transition'}`).join('\n')}\n\n👆 Review the concept above and click **Approve** to render, or **Edit** to modify.`,
+            text: `📋 Animation Concept Ready for Review\n\nType: ${typeLabels[type]}\nDuration: ${concept.durationInSeconds.toFixed(1)}s (${concept.totalDuration} frames)\n\nVideo Summary:\n${concept.contentSummary}\n\nKey Topics: ${concept.keyTopics.join(', ') || 'N/A'}\n\nProposed Scenes (${concept.scenes.length}):\n${concept.scenes.map((s, i) => `${i + 1}. ${s.type} (${(s.duration / 30).toFixed(1)}s): ${s.content.title || s.content.items?.map(item => item.label).join(', ') || 'Transition'}`).join('\n')}\n\n👆 Review the concept above and click Approve to render, or Edit to modify.`,
             isProcessingGifs: false,
           };
         }
@@ -579,6 +531,8 @@ export default function AIPromptPanel({
             text: `🎉 ${typeLabels[pendingAnimationConcept.type]} rendered successfully!\n\nDuration: ${result.duration}s\n\nThe animation has been added to your timeline.`,
             isProcessingGifs: false,
             applied: true,
+            animationAssetId: result.assetId,
+            animationName: `${typeLabels[pendingAnimationConcept.type]}`,
           };
         }
         return updated;
@@ -637,7 +591,7 @@ export default function AIPromptPanel({
         // Show available template categories
         setChatHistory(prev => [...prev, {
           type: 'assistant',
-          text: 'What type of template would you like?\n\n• **Lower Third** - Name & title overlay\n• **Counter** - Animated numbers/stats\n• **Progress Bar** - Visual progress indicator\n• **Call to Action** - Subscribe/Like buttons\n• **Chart** - Bar, pie, or line charts\n• **Logo Reveal** - Animated logo intro\n\nDescribe what you need, e.g. "Add a lower third for John Smith, CEO"',
+          text: 'What type of template would you like?\n\n• Lower Third - Name & title overlay\n• Counter - Animated numbers/stats\n• Progress Bar - Visual progress indicator\n• Call to Action - Subscribe/Like buttons\n• Chart - Bar, pie, or line charts\n• Logo Reveal - Animated logo intro\n\nDescribe what you need, e.g. "Add a lower third for John Smith, CEO"',
         }]);
         break;
 
@@ -648,7 +602,7 @@ export default function AIPromptPanel({
       case 'text-animation':
         setChatHistory(prev => [...prev, {
           type: 'assistant',
-          text: 'What text would you like to animate? Include the style if you have a preference:\n\n• **Typewriter** - Text appears letter by letter\n• **Bounce** - Text bounces in\n• **Fade** - Smooth fade in\n• **Glitch** - Digital glitch effect\n\nExample: "Add animated text \'Welcome!\' with bounce effect"',
+          text: 'What text would you like to animate? Include the style if you have a preference:\n\n• Typewriter - Text appears letter by letter\n• Bounce - Text bounces in\n• Fade - Smooth fade in\n• Glitch - Digital glitch effect\n\nExample: "Add animated text \'Welcome!\' with bounce effect"',
         }]);
         break;
 
@@ -660,88 +614,151 @@ export default function AIPromptPanel({
     }
   };
 
-  // Check if prompt is asking for a custom AI-generated animation (demo, explainer, creative scenarios, etc.)
-  const isCustomAnimationPrompt = (text: string): boolean => {
-    const lower = text.toLowerCase();
+  // ===========================================
+  // DIRECTOR: Intelligent workflow routing
+  // ===========================================
+  // The Director analyzes the user's prompt AND context to determine
+  // which workflow is most appropriate. It doesn't use priority - it
+  // uses understanding of what the user wants.
 
-    // Direct animation creation keywords
-    const hasAnimationKeyword = lower.includes('animation') || lower.includes('animate') || lower.includes('animated');
-    const hasCreationVerb = lower.includes('create') || lower.includes('make') || lower.includes('generate') ||
-                           lower.includes('build') || lower.includes('design') || lower.includes('produce');
-    const hasShowVerb = lower.includes('show') || lower.includes('display') || lower.includes('visualize') ||
-                       lower.includes('illustrate') || lower.includes('depict') || lower.includes('portray');
+  type WorkflowType =
+    | 'edit-animation'      // Modify an existing Remotion animation
+    | 'create-animation'    // Create a new Remotion animation
+    | 'motion-graphics'     // Add template-based motion graphics
+    | 'captions'            // Add captions to video
+    | 'auto-gif'            // Extract keywords and add GIFs
+    | 'b-roll'              // Generate AI B-roll images
+    | 'dead-air'            // Remove silence from video
+    | 'chapter-cuts'        // Split video into chapters
+    | 'transcript-animation' // Kinetic typography from speech
+    | 'contextual-animation' // Animation based on video content
+    | 'ffmpeg-edit'         // Direct FFmpeg video manipulation
+    | 'unknown';            // Need to ask for clarification
 
-    // Creative/descriptive content indicators (companies, characters, scenarios)
-    const hasCreativeContent = lower.includes('company') || lower.includes('brand') || lower.includes('logo') ||
-                              lower.includes('character') || lower.includes('story') || lower.includes('scene') ||
-                              lower.includes('battle') || lower.includes('versus') || lower.includes(' vs ') ||
-                              lower.includes('destroy') || lower.includes('fight') || lower.includes('compete') ||
-                              lower.includes('transform') || lower.includes('evolve') || lower.includes('journey');
+  interface DirectorContext {
+    prompt: string;
+    isOnEditTab: boolean;
+    editTabHasAnimation: boolean;
+    editTabAssetId?: string;
+    hasVideo: boolean;
+    hasTimeRange: boolean;
+    timeRangeStart?: number;
+    timeRangeEnd?: number;
+  }
 
-    return (
-      // Direct requests: "create animation", "make animated video", etc.
-      (hasCreationVerb && hasAnimationKeyword) ||
-      // Show something in animation: "show X in the animation", "show X getting Y"
-      (hasShowVerb && hasAnimationKeyword) ||
-      (hasShowVerb && hasCreativeContent) ||
-      // Animate a concept/scenario
-      (lower.includes('animate') && (lower.includes('explanation') || lower.includes('how') || lower.includes('showing'))) ||
-      // Specific video types
-      lower.includes('product walkthrough') ||
-      lower.includes('feature demo') ||
-      lower.includes('explainer video') ||
-      lower.includes('step by step animation') ||
-      lower.includes('demo video') ||
-      lower.includes('promo video') ||
-      lower.includes('promotional animation') ||
-      // Visualize concepts
-      (lower.includes('visualize') && (lower.includes('concept') || lower.includes('process') || lower.includes('workflow'))) ||
-      // Creative scenarios that imply animation generation
-      (hasCreativeContent && (hasAnimationKeyword || lower.includes('video'))) ||
-      // "in the animation" phrase
-      lower.includes('in the animation') ||
-      lower.includes('in an animation') ||
-      // Describe a scenario to animate
-      (lower.includes('getting') && hasCreativeContent)
-    );
-  };
+  const determineWorkflow = (ctx: DirectorContext): WorkflowType => {
+    const lower = ctx.prompt.toLowerCase();
 
-  // Check if prompt is asking for motion graphics / animated overlays
-  const isMotionGraphicsPrompt = (text: string): boolean => {
-    const lower = text.toLowerCase();
-    return (
-      lower.includes('lower third') ||
-      lower.includes('lowerthird') ||
-      lower.includes('name title') ||
-      lower.includes('animated text') ||
-      lower.includes('text animation') ||
-      lower.includes('counter animation') ||
-      lower.includes('number counter') ||
-      lower.includes('count up') ||
-      lower.includes('progress bar') ||
-      lower.includes('call to action') ||
-      lower.includes('cta button') ||
-      lower.includes('subscribe button') ||
-      lower.includes('like button') ||
-      lower.includes('logo reveal') ||
-      lower.includes('logo animation') ||
-      lower.includes('intro animation') ||
-      lower.includes('outro animation') ||
-      lower.includes('screen mockup') ||
-      lower.includes('device mockup') ||
-      lower.includes('browser mockup') ||
-      lower.includes('phone mockup') ||
-      lower.includes('testimonial') ||
-      lower.includes('social proof') ||
-      lower.includes('before after') ||
-      lower.includes('comparison') ||
-      lower.includes('chart animation') ||
-      lower.includes('animated chart') ||
-      lower.includes('data visualization') ||
-      lower.includes('pie chart') ||
-      lower.includes('bar chart') ||
-      (lower.includes('motion') && lower.includes('graphic'))
-    );
+    // ============================================
+    // CONTEXT-AWARE DECISIONS
+    // ============================================
+
+    // If on an edit tab with an animation, most prompts are about editing that animation
+    // Unless they explicitly ask for something unrelated (like "add captions to my main video")
+    if (ctx.isOnEditTab && ctx.editTabHasAnimation) {
+      // Check if they're explicitly asking about the main video/timeline
+      const isAboutMainVideo = lower.includes('main video') ||
+                               lower.includes('main timeline') ||
+                               lower.includes('original video');
+
+      // Check if they're asking for something that only applies to video content (not animations)
+      const isVideoOnlyFeature = lower.includes('caption') ||
+                                 lower.includes('subtitle') ||
+                                 lower.includes('dead air') ||
+                                 lower.includes('silence') ||
+                                 lower.includes('chapter');
+
+      // If not explicitly about main video and not a video-only feature, edit the animation
+      if (!isAboutMainVideo && !isVideoOnlyFeature) {
+        // This includes: "make it bigger", "change colors", "add more scenes",
+        // "make it faster", "add an image", etc.
+        return 'edit-animation';
+      }
+    }
+
+    // ============================================
+    // INTENT-BASED DECISIONS (when not in edit tab)
+    // ============================================
+
+    // Caption-related requests
+    if (lower.includes('caption') || lower.includes('subtitle') ||
+        lower.includes('transcribe') || lower.includes('transcription')) {
+      return 'captions';
+    }
+
+    // Dead air / silence removal
+    if (lower.includes('dead air') || lower.includes('silence') ||
+        lower.includes('remove quiet') || lower.includes('remove pauses')) {
+      return 'dead-air';
+    }
+
+    // Chapter cuts
+    if (lower.includes('chapter') || lower.includes('split into sections') ||
+        lower.includes('segment') || (lower.includes('cut') && lower.includes('topic'))) {
+      return 'chapter-cuts';
+    }
+
+    // GIF-related requests
+    if (lower.includes('gif') || lower.includes('giphy') ||
+        (lower.includes('add') && lower.includes('meme'))) {
+      return 'auto-gif';
+    }
+
+    // B-roll requests
+    if (lower.includes('b-roll') || lower.includes('broll') ||
+        lower.includes('stock image') || lower.includes('overlay image')) {
+      return 'b-roll';
+    }
+
+    // Transcript animation (kinetic typography)
+    if ((lower.includes('transcript') && lower.includes('animation')) ||
+        lower.includes('kinetic typography') || lower.includes('animate the words') ||
+        lower.includes('animate text from speech')) {
+      return 'transcript-animation';
+    }
+
+    // Motion graphics templates (specific template types)
+    if (lower.includes('lower third') || lower.includes('counter') ||
+        lower.includes('progress bar') || lower.includes('call to action') ||
+        lower.includes('cta') || lower.includes('subscribe button') ||
+        lower.includes('logo reveal') || lower.includes('testimonial')) {
+      return 'motion-graphics';
+    }
+
+    // Contextual animation (based on video content at a specific time)
+    if (ctx.hasTimeRange && (lower.includes('animation') || lower.includes('animate') ||
+        lower.includes('visual') || lower.includes('graphic'))) {
+      return 'contextual-animation';
+    }
+
+    // Create new animation (explicit creation requests)
+    if ((lower.includes('create') || lower.includes('make') || lower.includes('generate')) &&
+        (lower.includes('animation') || lower.includes('animated') || lower.includes('motion'))) {
+      return 'create-animation';
+    }
+
+    // Animation editing language when there might be an animation in context
+    if (lower.includes('animation') &&
+        (lower.includes('change') || lower.includes('modify') || lower.includes('update') ||
+         lower.includes('edit') || lower.includes('adjust'))) {
+      // If we have an animation asset in the edit tab, edit it
+      if (ctx.editTabHasAnimation) {
+        return 'edit-animation';
+      }
+      // Otherwise they might want to create one
+      return 'create-animation';
+    }
+
+    // FFmpeg-style video edits (trim, cut, speed, etc.)
+    if (lower.includes('trim') || lower.includes('cut') || lower.includes('speed') ||
+        lower.includes('slow') || lower.includes('fast') || lower.includes('reverse') ||
+        lower.includes('crop') || lower.includes('rotate') || lower.includes('flip') ||
+        lower.includes('brightness') || lower.includes('contrast') || lower.includes('filter')) {
+      return 'ffmpeg-edit';
+    }
+
+    // Default: if nothing specific matched, use ffmpeg for general edits
+    return 'ffmpeg-edit';
   };
 
   // Handle chapter cuts workflow
@@ -772,7 +789,7 @@ export default function AIPromptPanel({
 
       setChatHistory(prev => [...prev, {
         type: 'assistant',
-        text: `✅ Found ${result.chapters.length} chapters and made ${result.cutsApplied} cuts!\n\n**Chapters:**\n${chapterList}\n\nYour video has been split at each chapter point. You can now rearrange, trim, or delete sections as needed.`,
+        text: `✅ Found ${result.chapters.length} chapters and made ${result.cutsApplied} cuts!\n\nChapters:\n${chapterList}\n\nYour video has been split at each chapter point. You can now rearrange, trim, or delete sections as needed.`,
       }]);
 
     } catch (error) {
@@ -1095,22 +1112,90 @@ export default function AIPromptPanel({
   };
 
   // Handle custom AI-generated animation workflow
-  const handleCustomAnimationWorkflow = async (description: string, _startTimeOverride?: number) => {
+  const handleCustomAnimationWorkflow = async (description: string, startTimeOverride?: number, endTimeOverride?: number) => {
+    // Debug: log what time values we received
+    console.log('[DEBUG] handleCustomAnimationWorkflow called with:', JSON.stringify({ description: description.substring(0, 50), startTimeOverride, endTimeOverride }));
+
+    // When a time range is specified, use the contextual workflow with approval step
+    // This analyzes the video content and shows scenes for user review before rendering
+    if (startTimeOverride !== undefined && onAnalyzeForAnimation) {
+      setIsProcessing(true);
+      setProcessingStatus('Analyzing video content...');
+
+      try {
+        const timeStr = formatTimeShort(startTimeOverride);
+        const endTimeStr = endTimeOverride !== undefined ? formatTimeShort(endTimeOverride) : '';
+        const rangeStr = endTimeOverride !== undefined ? `${timeStr} - ${endTimeStr}` : timeStr;
+
+        setChatHistory(prev => [...prev, {
+          type: 'assistant',
+          text: `🎬 Analyzing video segment ${rangeStr} for: "${description}"\n\n1. Extracting audio from ${rangeStr}\n2. Transcribing ONLY that segment\n3. Understanding what's being discussed\n4. Designing relevant animation scenes\n\nYou'll be able to review and approve the scenes before rendering...`,
+          isProcessingGifs: true,
+        }]);
+
+        // Build time range - use provided end time, or create a 20s window around the start time
+        const timeRangeToUse = endTimeOverride !== undefined
+          ? { start: startTimeOverride, end: endTimeOverride }
+          : { start: Math.max(0, startTimeOverride - 5), end: startTimeOverride + 15 }; // Default 20s window around timestamp
+
+        // Debug: log the time range being passed to analysis
+        console.log('[DEBUG] Calling onAnalyzeForAnimation with timeRange:', JSON.stringify(timeRangeToUse));
+
+        // Analyze video to get concept - pass description and time range for context
+        // The time range ensures only that segment's transcript is analyzed
+        const { concept } = await onAnalyzeForAnimation({
+          type: 'highlight',
+          description: `At timestamp ${timeStr}: ${description}`,
+          timeRange: timeRangeToUse,
+        });
+
+        // Store the concept with the start time for when it's approved
+        const conceptWithTime = { ...concept, startTime: startTimeOverride };
+        setPendingAnimationConcept(conceptWithTime);
+
+        // Show the concept for approval
+        setChatHistory(prev => {
+          const updated = [...prev];
+          const lastIdx = updated.length - 1;
+          if (updated[lastIdx]?.isProcessingGifs) {
+            updated[lastIdx] = {
+              ...updated[lastIdx],
+              text: `📋 Animation Concept Ready (for ${rangeStr})\n\nContent Summary: ${concept.contentSummary}\n\nKey Topics: ${concept.keyTopics.join(', ')}\n\nProposed Scenes (${concept.scenes.length}):\n${concept.scenes.map((s, i) => `${i + 1}. ${s.type}: ${s.content.title || s.content.subtitle || 'Visual'} (${s.duration}s)`).join('\n')}\n\nTotal Duration: ${concept.totalDuration}s\n\n👇 Review and approve below, or cancel to modify your request.`,
+              isProcessingGifs: false,
+            };
+          }
+          return updated;
+        });
+
+      } catch (error) {
+        console.error('Custom animation analysis error:', error);
+        setChatHistory(prev => [...prev, {
+          type: 'assistant',
+          text: `❌ Failed to analyze video: ${error instanceof Error ? error.message : 'Unknown error'}\n\nTry a different description or check that your video has audio.`,
+        }]);
+      } finally {
+        setIsProcessing(false);
+        setProcessingStatus('');
+      }
+      return;
+    }
+
+    // For requests without time range, render directly (but still get video context)
     if (!onCreateCustomAnimation) return;
 
     setIsProcessing(true);
     setProcessingStatus('Generating custom animation with AI...');
 
     try {
+      const hasTimeRange = startTimeOverride !== undefined;
       setChatHistory(prev => [...prev, {
         type: 'assistant',
-        text: `🎬 Creating custom animation...\n\n1. Analyzing your description\n2. Generating Remotion component with AI\n3. Rendering animation to video\n4. Adding to timeline\n\nThis may take a moment...`,
+        text: `🎬 Creating custom animation...\n\n1. ${hasTimeRange ? 'Using specified time range for context' : 'Analyzing video transcript for context'}\n2. Generating Remotion component with AI\n3. Rendering animation to video\n4. Adding to timeline\n\nThis may take a moment...`,
         isProcessingGifs: true,
       }]);
 
-      // Note: Custom animations currently use their own placement logic (intro/outro detection)
-      // Time range override is accepted but not yet fully implemented for custom animations
-      const result = await onCreateCustomAnimation(description);
+      // Pass time range to the animation generator for transcript context
+      const result = await onCreateCustomAnimation(description, startTimeOverride, endTimeOverride);
 
       // Update the last message to show completion with edit-in-tab option
       setChatHistory(prev => {
@@ -1134,6 +1219,77 @@ export default function AIPromptPanel({
       setChatHistory(prev => [...prev, {
         type: 'assistant',
         text: `❌ Failed to create animation: ${error instanceof Error ? error.message : 'Unknown error'}\n\nTry simplifying your description or being more specific about what you want to animate.`,
+      }]);
+    } finally {
+      setIsProcessing(false);
+      setProcessingStatus('');
+    }
+  };
+
+  // Handle editing an existing animation (when on an edit tab)
+  const handleEditAnimationWorkflow = async (editPrompt: string, assetId: string) => {
+    if (!onEditAnimation) return;
+
+    setIsProcessing(true);
+    setProcessingStatus('Editing animation with AI...');
+
+    try {
+      // Get the animation asset for display
+      const animationAsset = assets.find(a => a.id === assetId);
+      const animationName = animationAsset?.filename || 'Animation';
+
+      // Build context message showing what the AI has access to
+      let contextInfo = '1. Loading current animation structure\n2. Applying your changes with AI\n3. Re-rendering animation';
+      if (editTabV1Context) {
+        contextInfo = `1. Loading current animation structure\n2. Using V1 context: "${editTabV1Context.filename}"\n3. Applying your changes with AI\n4. Re-rendering animation`;
+      }
+
+      setChatHistory(prev => [...prev, {
+        type: 'assistant',
+        text: `🎨 Editing "${animationName}"...\n\n${contextInfo}\n\nThis may take a moment...`,
+        isProcessingGifs: true,
+      }]);
+
+      // Pass V1 context if available (hybrid approach) and the tab ID to update
+      console.log('[handleEditAnimationWorkflow] Calling onEditAnimation with:', {
+        assetId,
+        editPrompt: editPrompt.substring(0, 50) + '...',
+        hasV1Context: !!editTabV1Context,
+        activeTabId,
+      });
+
+      const result = await onEditAnimation(assetId, editPrompt, editTabV1Context || undefined, activeTabId);
+
+      console.log('[handleEditAnimationWorkflow] Edit complete:', {
+        resultAssetId: result.assetId,
+        originalAssetId: assetId,
+        isSameAsset: result.assetId === assetId,
+        duration: result.duration,
+        sceneCount: result.sceneCount,
+      });
+
+      // Update the last message to show completion
+      // Note: Animation is edited in-place (same asset ID), so no need for "open in tab" button
+      setChatHistory(prev => {
+        const updated = [...prev];
+        const lastIdx = updated.length - 1;
+        if (updated[lastIdx]?.isProcessingGifs) {
+          updated[lastIdx] = {
+            ...updated[lastIdx],
+            text: `✅ Animation updated in place!\n\nDuration: ${result.duration}s\nScenes: ${result.sceneCount}\n\nYou can continue editing with more prompts.`,
+            isProcessingGifs: false,
+            applied: true,
+            isInPlaceEdit: true, // Flag to indicate this was an in-place edit (no "open in tab" button)
+          };
+        }
+        return updated;
+      });
+
+    } catch (error) {
+      console.error('Edit animation workflow error:', error);
+      setChatHistory(prev => [...prev, {
+        type: 'assistant',
+        text: `❌ Failed to edit animation: ${error instanceof Error ? error.message : 'Unknown error'}\n\nTry a simpler edit request or check that the animation is AI-generated.`,
       }]);
     } finally {
       setIsProcessing(false);
@@ -1168,7 +1324,7 @@ export default function AIPromptPanel({
 
       setChatHistory(prev => [...prev, {
         type: 'assistant',
-        text: `Adding **${templateInfo.name}** to your timeline at ${formatTimeShort(config.startTime || 0)}...`,
+        text: `Adding ${templateInfo.name} to your timeline at ${formatTimeShort(config.startTime || 0)}...`,
         isProcessingGifs: true,
       }]);
 
@@ -1181,7 +1337,7 @@ export default function AIPromptPanel({
         if (updated[lastIdx]?.isProcessingGifs) {
           updated[lastIdx] = {
             ...updated[lastIdx],
-            text: `✅ Added **${templateInfo.name}** to your timeline!\n\nYou can select the clip in the timeline to customize its properties.`,
+            text: `✅ Added ${templateInfo.name} to your timeline!\n\nYou can select the clip in the timeline to customize its properties.`,
             isProcessingGifs: false,
             applied: true,
           };
@@ -1267,7 +1423,7 @@ export default function AIPromptPanel({
         const lastIdx = updated.length - 1;
         if (updated[lastIdx]?.isProcessingGifs) {
           const message = result.removedDuration > 0
-            ? `✅ Dead air removed!\n\n**Removed:** ${result.removedDuration.toFixed(1)} seconds of silence\n**New duration:** ${result.duration.toFixed(1)} seconds`
+            ? `✅ Dead air removed!\n\nRemoved: ${result.removedDuration.toFixed(1)} seconds of silence\nNew duration: ${result.duration.toFixed(1)} seconds`
             : '✅ No significant silence detected in your video.';
           updated[lastIdx] = {
             ...updated[lastIdx],
@@ -1320,7 +1476,7 @@ export default function AIPromptPanel({
         if (updated[lastIdx]?.isProcessingGifs) {
           updated[lastIdx] = {
             ...updated[lastIdx],
-            text: `✅ Transcript animation created!\n\n**Duration:** ${result.duration}s\n\nAnimated text overlay has been added to your timeline (V2 track).`,
+            text: `✅ Transcript animation created!\n\nDuration: ${result.duration}s\n\nAnimated text overlay has been added to your timeline (V2 track).`,
             isProcessingGifs: false,
             applied: true,
             animationAssetId: result.assetId,
@@ -1360,8 +1516,68 @@ export default function AIPromptPanel({
     const displayMessage = `${timePart}${refPart}${userMessage}`;
     setChatHistory((prev) => [...prev, { type: 'user', text: displayMessage }]);
 
-    // Check if this is a caption request
-    if (isCaptionPrompt(userMessage)) {
+    // ===========================================
+    // DIRECTOR: Determine the appropriate workflow
+    // ===========================================
+    const isManualTab = editTabAssetId?.startsWith('edit-') ?? false;
+    const animationAsset = (!isManualTab && editTabAssetId) ? assets.find(a => a.id === editTabAssetId) : null;
+
+    // Check if on an animation edit tab - the tab's assetId indicates it was created via "Open in Tab"
+    // Trust this even if the asset isn't found in local state (handles timing issues)
+    const isOnAnimationEditTab = !isManualTab && !!editTabAssetId;
+
+    // Also check the aiGenerated flag if we can find the asset (more reliable confirmation)
+    const editTabHasRemotionAnimation = !!(animationAsset && animationAsset.aiGenerated) ||
+                                         !!(editTabV1Context && assets.find(a => a.id === editTabV1Context.assetId)?.aiGenerated);
+
+    // For edit detection: trust either the tab metadata (assetId set) OR the aiGenerated flag
+    // This ensures we route to edit-animation even if there's a timing issue with assets state
+    const editTabHasAnimation = isOnAnimationEditTab || editTabHasRemotionAnimation;
+
+    const directorContext: DirectorContext = {
+      prompt: userMessage,
+      isOnEditTab: activeTabId !== 'main',
+      editTabHasAnimation,
+      editTabAssetId,
+      hasVideo: hasVideo ?? false,
+      hasTimeRange: !!savedTimeRange,
+      timeRangeStart: savedTimeRange?.start,
+      timeRangeEnd: savedTimeRange?.end,
+    };
+
+    const workflow = determineWorkflow(directorContext);
+    console.log('[Director] Determined workflow:', workflow);
+    console.log('[Director] Full context:', {
+      prompt: userMessage.substring(0, 50) + '...',
+      isOnEditTab: directorContext.isOnEditTab,
+      editTabHasAnimation: directorContext.editTabHasAnimation,
+      isOnAnimationEditTab,
+      editTabHasRemotionAnimation,
+      editTabAssetId,
+      activeTabId,
+      hasTimeRange: directorContext.hasTimeRange,
+      animationAssetFound: !!animationAsset,
+      animationAssetAiGenerated: animationAsset?.aiGenerated,
+    });
+
+    // ===========================================
+    // Execute the determined workflow
+    // ===========================================
+
+    // Edit existing animation (Remotion)
+    // Use the V1 clip's asset ID if available (for manual tabs with dragged animations)
+    // Otherwise fall back to editTabAssetId (for tabs created via "Edit in new tab")
+    const animationAssetIdToEdit = editTabV1Context?.assetId || editTabAssetId;
+    if (workflow === 'edit-animation' && animationAssetIdToEdit && onEditAnimation) {
+      console.log('[Director] Editing animation with asset ID:', animationAssetIdToEdit);
+      console.log('[Director] editTabAssetId was:', editTabAssetId);
+      console.log('[Director] editTabV1Context?.assetId was:', editTabV1Context?.assetId);
+      await handleEditAnimationWorkflow(userMessage, animationAssetIdToEdit);
+      return;
+    }
+
+    // Captions
+    if (workflow === 'captions') {
       if (!hasVideo) {
         setChatHistory(prev => [...prev, {
           type: 'assistant',
@@ -1369,8 +1585,6 @@ export default function AIPromptPanel({
         }]);
         return;
       }
-
-      // Show caption options UI
       setChatHistory(prev => [...prev, {
         type: 'assistant',
         text: 'Configure your caption style below, then click "Add Captions" to start.',
@@ -1379,97 +1593,96 @@ export default function AIPromptPanel({
       return;
     }
 
-    // Check if this is an auto-GIF request
-    if (isAutoGifPrompt(userMessage)) {
+    // Auto-GIF
+    if (workflow === 'auto-gif') {
       if (!hasVideo) {
         setChatHistory(prev => [...prev, {
           type: 'assistant',
-          text: 'Please upload a video first. I\'ll then transcribe it, extract keywords (like brand names), find relevant GIFs, and add them to your timeline automatically.',
+          text: 'Please upload a video first. I\'ll then extract keywords and add relevant GIFs.',
         }]);
         return;
       }
-
       await handleAutoGifWorkflow();
       return;
     }
 
-    // Check if this is a B-roll request
-    if (isBrollPrompt(userMessage)) {
+    // B-roll
+    if (workflow === 'b-roll') {
       if (!hasVideo) {
         setChatHistory(prev => [...prev, {
           type: 'assistant',
-          text: 'Please upload a video first. I\'ll then transcribe it, identify key moments, generate AI images, and add them as B-roll overlays.',
+          text: 'Please upload a video first. I\'ll then generate AI B-roll images.',
         }]);
         return;
       }
-
       await handleBrollWorkflow();
       return;
     }
 
-    // Check if this is a dead air removal request
-    if (isDeadAirPrompt(userMessage)) {
+    // Dead air removal
+    if (workflow === 'dead-air') {
       if (!hasVideo) {
         setChatHistory(prev => [...prev, {
           type: 'assistant',
-          text: 'Please upload a video first. I\'ll then detect and remove silent periods from your video.',
+          text: 'Please upload a video first. I\'ll then detect and remove silent periods.',
         }]);
         return;
       }
-
       await handleDeadAirWorkflow();
       return;
     }
 
-    // Check if this is a chapter cuts request
-    if (isChapterCutPrompt(userMessage)) {
+    // Chapter cuts
+    if (workflow === 'chapter-cuts') {
       if (!hasVideo) {
         setChatHistory(prev => [...prev, {
           type: 'assistant',
-          text: 'Please upload a video first. I\'ll then analyze it, identify chapters, and make cuts at each chapter point.',
+          text: 'Please upload a video first. I\'ll then identify chapters and make cuts.',
         }]);
         return;
       }
-
       await handleChapterCutWorkflow();
       return;
     }
 
-    // Check if this is a transcript animation request (kinetic typography)
-    if (isTranscriptAnimationPrompt(userMessage)) {
+    // Transcript animation (kinetic typography)
+    if (workflow === 'transcript-animation') {
       if (!hasVideo) {
         setChatHistory(prev => [...prev, {
           type: 'assistant',
-          text: 'Please upload a video first. I\'ll then transcribe the speech and create animated text overlays synced to what\'s being said.',
+          text: 'Please upload a video first. I\'ll then create animated text from speech.',
         }]);
         return;
       }
-
       await handleTranscriptAnimationWorkflow();
       return;
     }
 
-    // Check if prompt is asking for a contextual animation (intro/outro that uses video content)
-    const contextualCheck = isContextualAnimationPrompt(userMessage);
-    if (contextualCheck.isMatch) {
-      await handleContextualAnimationWorkflow(contextualCheck.type, userMessage);
+    // Contextual animation (based on video content at specific time)
+    if (workflow === 'contextual-animation') {
+      const contextualCheck = isContextualAnimationPrompt(userMessage);
+      if (contextualCheck.isMatch) {
+        await handleContextualAnimationWorkflow(contextualCheck.type, userMessage);
+        return;
+      }
+      // Fall through to create-animation if contextual check didn't match
+      await handleCustomAnimationWorkflow(userMessage, savedTimeRange?.start, savedTimeRange?.end);
       return;
     }
 
-    // Check if this is a custom animation request (AI-generated)
-    // This catches any creative/animation requests and sends them to the AI generator
-    if (isCustomAnimationPrompt(userMessage)) {
-      await handleCustomAnimationWorkflow(userMessage, savedTimeRange?.start);
+    // Create new animation (Remotion)
+    if (workflow === 'create-animation') {
+      await handleCustomAnimationWorkflow(userMessage, savedTimeRange?.start, savedTimeRange?.end);
       return;
     }
 
-    // Check if this is a motion graphics request (template-based)
-    if (isMotionGraphicsPrompt(userMessage)) {
+    // Motion graphics templates
+    if (workflow === 'motion-graphics') {
       await handleMotionGraphicsWorkflow(userMessage, savedTimeRange?.start);
       return;
     }
 
-    // Regular AI edit flow
+    // FFmpeg video edit (default for video manipulation)
     setIsProcessing(true);
     setProcessingStatus('Starting AI...');
 
@@ -1557,6 +1770,39 @@ export default function AIPromptPanel({
         </p>
       </div>
 
+
+      {/* Edit animation mode indicator */}
+      {activeTabId !== 'main' && editTabAssetId && (
+        <div className="p-3 bg-blue-500/10 border-b border-blue-500/20">
+          <div className="flex items-center gap-2">
+            <Film className="w-4 h-4 text-blue-400" />
+            <div className="flex-1">
+              <p className="text-xs text-blue-300 font-medium">
+                {editTabV1Context?.aiGenerated ? 'Remotion Animation Edit Mode' : 'Edit Mode'}
+              </p>
+              <p className="text-[10px] text-blue-400/70">
+                {editTabV1Context?.aiGenerated
+                  ? 'All edits will use Remotion. Use + to add assets from library.'
+                  : 'Prompts will modify this clip. Use + to add assets from library.'}
+              </p>
+              {/* Show V1 context if detected */}
+              {editTabV1Context && (
+                <div className="mt-1.5 flex items-center gap-1.5">
+                  <span className="text-[10px] text-blue-400/50">V1:</span>
+                  <span className="px-1.5 py-0.5 bg-blue-500/20 rounded text-[10px] text-blue-300 truncate max-w-[150px]">
+                    {editTabV1Context.filename}
+                  </span>
+                  {editTabV1Context.aiGenerated && (
+                    <span className="px-1.5 py-0.5 bg-purple-500/20 rounded text-[10px] text-purple-300">
+                      Remotion
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Processing overlay */}
       {isApplying && (
@@ -1754,6 +2000,8 @@ export default function AIPromptPanel({
             </div>
           </div>
         )}
+        {/* Scroll anchor */}
+        <div ref={chatEndRef} />
       </div>
 
       {/* Caption Options UI */}

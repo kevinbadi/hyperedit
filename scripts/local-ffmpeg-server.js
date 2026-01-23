@@ -187,6 +187,7 @@ function createSession(originalName) {
     editCount: 0,
     assets: new Map(), // assetId -> asset info
     project: projectState,
+    transcriptCache: new Map(), // assetId -> { text, words, cachedAt }
   };
   sessions.set(sessionId, session);
   console.log(`[Session] Created: ${sessionId}`);
@@ -1570,6 +1571,7 @@ function handleAssetList(req, res, sessionId) {
     width: asset.width,
     height: asset.height,
     thumbnailUrl: asset.thumbPath ? `/session/${sessionId}/assets/${asset.id}/thumbnail` : null,
+    aiGenerated: asset.aiGenerated || false, // True for Remotion-generated animations
   }));
 
   res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -2455,6 +2457,127 @@ async function runLocalWhisper(audioPath, jobId) {
   });
 }
 
+// Cached transcription helper - avoids re-transcribing the same video
+// Returns { text: string, words: Array<{text, start, end}> }
+async function getOrTranscribeVideo(session, videoAsset, jobId) {
+  // Check cache first
+  if (session.transcriptCache.has(videoAsset.id)) {
+    const cached = session.transcriptCache.get(videoAsset.id);
+    console.log(`[${jobId}] Using cached transcript for ${videoAsset.filename} (cached ${Math.round((Date.now() - cached.cachedAt) / 1000)}s ago)`);
+    return { text: cached.text, words: cached.words };
+  }
+
+  console.log(`[${jobId}] Transcribing ${videoAsset.filename}...`);
+
+  // Check available transcription methods
+  const hasLocalWhisper = await checkLocalWhisper();
+  const openaiKey = process.env.OPENAI_API_KEY;
+  const geminiKey = process.env.GEMINI_API_KEY;
+
+  if (!hasLocalWhisper && !openaiKey && !geminiKey) {
+    throw new Error('No transcription method available. Install local Whisper or set OPENAI_API_KEY/GEMINI_API_KEY');
+  }
+
+  // Extract audio from video
+  const audioPath = join(TEMP_DIR, `${jobId}-transcript-audio.mp3`);
+  await runFFmpeg([
+    '-y', '-i', videoAsset.path,
+    '-vn', '-acodec', 'libmp3lame', '-q:a', '4',
+    audioPath
+  ], jobId);
+
+  let transcription = { text: '', words: [] };
+
+  if (hasLocalWhisper) {
+    console.log(`[${jobId}] Using local Whisper...`);
+    transcription = await runLocalWhisper(audioPath, jobId);
+  } else if (openaiKey) {
+    console.log(`[${jobId}] Using OpenAI Whisper API...`);
+    const { FormData, File } = await import('formdata-node');
+    const audioBuffer = readFileSync(audioPath);
+    const formData = new FormData();
+    formData.append('file', new File([audioBuffer], 'audio.mp3', { type: 'audio/mp3' }));
+    formData.append('model', 'whisper-1');
+    formData.append('response_format', 'verbose_json');
+    formData.append('timestamp_granularities[]', 'word');
+
+    const whisperResponse = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${openaiKey}` },
+      body: formData,
+    });
+
+    if (!whisperResponse.ok) {
+      throw new Error(`Whisper API error: ${whisperResponse.status}`);
+    }
+
+    const whisperResult = await whisperResponse.json();
+    transcription = {
+      text: whisperResult.text || '',
+      words: (whisperResult.words || []).map(w => ({
+        text: w.word,
+        start: w.start,
+        end: w.end,
+      })),
+    };
+  } else if (geminiKey) {
+    console.log(`[${jobId}] Using Gemini for transcription...`);
+    const ai = new GoogleGenAI({ apiKey: geminiKey });
+    const audioBuffer = readFileSync(audioPath);
+    const audioBase64 = audioBuffer.toString('base64');
+
+    const result = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: [{
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
+          { text: `Transcribe this audio with word timestamps. Duration: ${videoAsset.duration}s. Return JSON: {"text": "full transcript", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
+        ]
+      }],
+    });
+
+    const respText = result.candidates[0].content.parts[0].text || '';
+    try {
+      transcription = JSON.parse(respText);
+    } catch {
+      const match = respText.match(/\{[\s\S]*\}/);
+      transcription = match ? JSON.parse(match[0]) : { text: respText, words: [] };
+    }
+  }
+
+  // Clean up audio file
+  try { unlinkSync(audioPath); } catch {}
+
+  // Cache the transcript
+  session.transcriptCache.set(videoAsset.id, {
+    text: transcription.text,
+    words: transcription.words || [],
+    cachedAt: Date.now(),
+  });
+
+  console.log(`[${jobId}] Transcription cached: ${transcription.text.substring(0, 100)}...`);
+  return transcription;
+}
+
+// Get transcript segment for a specific time range
+function getTranscriptSegment(transcription, startTime, endTime) {
+  if (!transcription.words || transcription.words.length === 0) {
+    return transcription.text;
+  }
+
+  const segmentWords = transcription.words.filter(w =>
+    w.end >= startTime && w.start <= endTime
+  );
+
+  if (segmentWords.length === 0) {
+    // Fall back to full transcript if no words in range
+    return transcription.text;
+  }
+
+  return segmentWords.map(w => w.text).join(' ');
+}
+
 async function handleTranscribe(req, res, sessionId) {
   const session = getSession(sessionId);
   if (!session) {
@@ -3276,7 +3399,7 @@ async function handleGenerateAnimation(req, res, sessionId) {
 
   try {
     const body = await parseBody(req);
-    const { description, fps = 30, width = 1920, height = 1080 } = body;
+    const { description, videoAssetId, startTime, endTime, fps = 30, width = 1920, height = 1080 } = body;
 
     if (!description) {
       res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -3293,6 +3416,102 @@ async function handleGenerateAnimation(req, res, sessionId) {
     console.log(`\n[${jobId}] === GENERATE AI ANIMATION ===`);
     console.log(`[${jobId}] Description: ${description}`);
 
+    // Step 0: Get video transcript context if a video is provided
+    let transcriptContext = '';
+    let relevantSegment = '';
+    let detectedTimeRange = null;
+
+    if (videoAssetId) {
+      const videoAsset = session.assets.get(videoAssetId);
+      if (videoAsset && videoAsset.type === 'video') {
+        console.log(`[${jobId}] Getting transcript context from ${videoAsset.filename}...`);
+
+        try {
+          const transcription = await getOrTranscribeVideo(session, videoAsset, jobId);
+
+          if (transcription.text) {
+            // If time range provided, get that segment
+            if (startTime !== undefined && endTime !== undefined) {
+              relevantSegment = getTranscriptSegment(transcription, startTime, endTime);
+              detectedTimeRange = { start: startTime, end: endTime };
+              console.log(`[${jobId}] Using specified time range: ${startTime}s - ${endTime}s`);
+            } else {
+              // Use AI to identify the relevant part of the video based on the description
+              console.log(`[${jobId}] Using AI to identify relevant video segment...`);
+
+              const ai = new GoogleGenAI({ apiKey });
+              const segmentResult = await ai.models.generateContent({
+                model: 'gemini-2.0-flash',
+                contents: [{
+                  role: 'user',
+                  parts: [{
+                    text: `Given this video transcript and an animation request, identify the most relevant time segment.
+
+VIDEO TRANSCRIPT (with word timestamps):
+${transcription.words?.slice(0, 200).map(w => `[${w.start.toFixed(1)}s] ${w.text}`).join(' ') || transcription.text.substring(0, 2000)}
+
+ANIMATION REQUEST: "${description}"
+
+VIDEO DURATION: ${videoAsset.duration}s
+
+Analyze the request and determine:
+1. Which part of the video is most relevant to this animation
+2. The start and end times of the relevant segment
+
+Return ONLY JSON (no markdown):
+{
+  "startTime": <seconds>,
+  "endTime": <seconds>,
+  "reasoning": "brief explanation of why this segment is relevant"
+}
+
+If the animation seems to be for the intro (beginning), use startTime: 0.
+If it's for the outro (ending), use times near the end.
+If it's about a specific topic mentioned in the transcript, find where that topic is discussed.
+If unclear or general, use the middle third of the video.`
+                  }]
+                }],
+              });
+
+              try {
+                const segmentText = segmentResult.candidates[0].content.parts[0].text;
+                const cleanedSegment = segmentText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+                const segmentData = JSON.parse(cleanedSegment);
+
+                if (segmentData.startTime !== undefined && segmentData.endTime !== undefined) {
+                  detectedTimeRange = {
+                    start: Math.max(0, segmentData.startTime),
+                    end: Math.min(videoAsset.duration, segmentData.endTime)
+                  };
+                  relevantSegment = getTranscriptSegment(transcription, detectedTimeRange.start, detectedTimeRange.end);
+                  console.log(`[${jobId}] AI detected relevant segment: ${detectedTimeRange.start}s - ${detectedTimeRange.end}s`);
+                  console.log(`[${jobId}] Reasoning: ${segmentData.reasoning}`);
+                }
+              } catch (e) {
+                console.log(`[${jobId}] Could not parse segment detection, using full transcript`);
+                relevantSegment = transcription.text;
+              }
+            }
+
+            // Build transcript context for the animation prompt
+            if (relevantSegment) {
+              transcriptContext = `
+
+VIDEO CONTEXT (from the transcript):
+"${relevantSegment.substring(0, 1500)}"
+${detectedTimeRange ? `
+This segment is from ${detectedTimeRange.start.toFixed(1)}s to ${detectedTimeRange.end.toFixed(1)}s in the video.` : ''}
+
+IMPORTANT: The animation content should be relevant to and inspired by this video context. Use specific terms, concepts, and themes from the transcript to make the animation feel connected to the video content.`;
+            }
+          }
+        } catch (transcriptError) {
+          console.log(`[${jobId}] Could not get transcript: ${transcriptError.message}`);
+          // Continue without transcript context
+        }
+      }
+    }
+
     // Step 1: Use Gemini to generate scene data
     console.log(`[${jobId}] Generating scenes with Gemini...`);
 
@@ -3301,7 +3520,7 @@ async function handleGenerateAnimation(req, res, sessionId) {
     const prompt = `You are a motion graphics designer. Create a JSON scene structure for an animated video based on this description:
 
 "${description}"
-
+${transcriptContext}
 Return ONLY valid JSON (no markdown, no code blocks) with this structure:
 {
   "scenes": [
@@ -3415,7 +3634,11 @@ Guidelines:
       thumbPath
     ], jobId);
 
-    // Clean up props file
+    // Store the scene data for future editing (don't delete props)
+    const sceneDataPath = join(session.dir, `${assetId}-scenes.json`);
+    writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
+
+    // Clean up temporary props file (but keep scene data)
     try {
       unlinkSync(propsPath);
     } catch (e) {
@@ -3425,7 +3648,7 @@ Guidelines:
     const { stat } = await import('fs/promises');
     const stats = await stat(outputPath);
 
-    // Create asset entry
+    // Create asset entry with scene data for re-editing
     const asset = {
       id: assetId,
       type: 'video',
@@ -3437,10 +3660,12 @@ Guidelines:
       width,
       height,
       createdAt: Date.now(),
-      // Metadata
+      // Metadata for AI animations
       aiGenerated: true,
       description,
       sceneCount: sceneData.scenes.length,
+      sceneDataPath, // Store path to scene data for re-editing
+      sceneData, // Also keep in memory for quick access
     };
 
     session.assets.set(assetId, asset);
@@ -3466,6 +3691,274 @@ Guidelines:
   }
 }
 
+// Edit an existing animation with a new prompt
+// Takes the original scene data and modifies it based on the prompt
+async function handleEditAnimation(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
+    return;
+  }
+
+  try {
+    const body = await parseBody(req);
+    const { assetId, editPrompt, assets: availableAssets, v1Context, fps = 30, width = 1920, height = 1080 } = body;
+
+    if (!assetId || !editPrompt) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'assetId and editPrompt are required' }));
+      return;
+    }
+
+    // Get the original animation asset
+    const originalAsset = session.assets.get(assetId);
+    if (!originalAsset) {
+      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Animation asset not found' }));
+      return;
+    }
+
+    if (!originalAsset.aiGenerated) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Asset is not an AI-generated animation' }));
+      return;
+    }
+
+    // Get the original scene data
+    let originalSceneData = originalAsset.sceneData;
+    if (!originalSceneData && originalAsset.sceneDataPath && existsSync(originalAsset.sceneDataPath)) {
+      originalSceneData = JSON.parse(readFileSync(originalAsset.sceneDataPath, 'utf-8'));
+    }
+
+    if (!originalSceneData) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Original scene data not found - cannot edit this animation' }));
+      return;
+    }
+
+    const jobId = randomUUID();
+    // IMPORTANT: Reuse the same asset ID to replace in-place (no asset creep)
+    const outputPath = originalAsset.path; // Overwrite existing video file
+    const thumbPath = originalAsset.thumbPath || join(session.assetsDir, `${assetId}_thumb.jpg`);
+    const propsPath = join(session.dir, `${jobId}-props.json`);
+    // Reuse existing scene data path or create one with original asset ID
+    const existingSceneDataPath = originalAsset.sceneDataPath || join(session.dir, `${assetId}-scenes.json`);
+
+    console.log(`\n[${jobId}] ========================================`);
+    console.log(`[${jobId}] === EDIT AI ANIMATION (IN-PLACE) ===`);
+    console.log(`[${jobId}] ========================================`);
+    console.log(`[${jobId}] IMPORTANT: Reusing SAME asset ID: ${assetId}`);
+    console.log(`[${jobId}] Output path (overwriting): ${outputPath}`);
+    console.log(`[${jobId}] Edit prompt: ${editPrompt}`);
+    console.log(`[${jobId}] Original scene count: ${originalSceneData.scenes?.length || 0}`);
+    console.log(`[${jobId}] Original scenes: ${originalSceneData.scenes?.map(s => s.type).join(', ') || 'none'}`);
+    console.log(`[${jobId}] Original scene data being passed to Gemini:`);
+    console.log(JSON.stringify(originalSceneData, null, 2));
+    if (v1Context) {
+      console.log(`[${jobId}] V1 context: ${v1Context.filename} (${v1Context.type})`);
+    }
+
+    // Build asset context for Gemini
+    let assetContext = '';
+
+    // Include V1 context if provided (primary clip in the edit tab)
+    if (v1Context) {
+      assetContext += `\n\nPRIMARY V1 CLIP CONTEXT (currently on the timeline):
+- ${v1Context.type}: "${v1Context.filename}" (id: ${v1Context.assetId})${v1Context.duration ? `, duration: ${v1Context.duration}s` : ''}
+This clip is currently being used in the animation timeline. You can reference it for visual coherence or incorporate it into scenes.`;
+    }
+
+    if (availableAssets && availableAssets.length > 0) {
+      assetContext += `\n\nAVAILABLE ASSETS you can use in the animation:
+${availableAssets.map(a => `- ${a.type}: "${a.filename}" (id: ${a.id})${a.type === 'video' ? `, duration: ${a.duration}s` : ''}`).join('\n')}
+
+To include an asset in a scene, use:
+{
+  "type": "asset",
+  "assetType": "image" | "video",
+  "assetId": "<asset id>",
+  "duration": <frames>,
+  "content": { "title": "optional overlay text" }
+}`;
+    }
+
+    // Use Gemini to modify the scene data
+    console.log(`[${jobId}] Modifying scenes with Gemini...`);
+
+    const ai = new GoogleGenAI({ apiKey });
+
+    const prompt = `You are editing an EXISTING Remotion animation. The user wants to make a SPECIFIC change.
+
+## YOUR TASK
+Make ONLY the change the user requested. Do NOT change anything else.
+
+## EXISTING ANIMATION (copy this exactly, then apply ONLY the requested change):
+${JSON.stringify(originalSceneData, null, 2)}
+
+## USER'S REQUESTED CHANGE:
+"${editPrompt}"
+${assetContext}
+
+## STRICT RULES - FOLLOW EXACTLY:
+1. Copy the ENTIRE existing animation structure above
+2. Find ONLY the specific element the user mentioned
+3. Change ONLY that element - nothing else
+4. Keep ALL other text, colors, durations, and properties EXACTLY the same
+
+## EXAMPLES OF CORRECT BEHAVIOR:
+- User says "change the title to Hello World" → Only change the title text field, keep all colors/styles
+- User says "make it blue" → Only change color values, keep all text the same
+- User says "add a new scene" → Keep all existing scenes, append the new one
+
+## EXAMPLES OF WRONG BEHAVIOR (DO NOT DO THIS):
+- Changing colors when user only asked about text
+- Changing text when user only asked about colors
+- Removing or reordering scenes
+- Changing durations unless specifically asked
+
+Return ONLY the complete JSON structure with your minimal change applied. No markdown, no explanation.`;
+
+    // Use Gemini 3.0 Pro for better instruction following on edits
+    const result = await ai.models.generateContent({
+      model: 'gemini-3-pro-preview',
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    });
+
+    let newSceneData;
+    try {
+      const responseText = result.candidates[0].content.parts[0].text;
+      const cleanedResponse = responseText
+        .replace(/```json\n?/g, '')
+        .replace(/```\n?/g, '')
+        .trim();
+      newSceneData = JSON.parse(cleanedResponse);
+    } catch (parseError) {
+      console.error(`[${jobId}] Failed to parse Gemini response:`, parseError);
+      throw new Error('Failed to parse AI-modified scene data');
+    }
+
+    console.log(`[${jobId}] Modified to ${newSceneData.scenes.length} scenes`);
+
+    const totalDuration = newSceneData.totalDuration || newSceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
+    const durationInSeconds = totalDuration / fps;
+
+    // Store scene data for future editing (overwrite existing)
+    writeFileSync(existingSceneDataPath, JSON.stringify(newSceneData, null, 2));
+
+    // Write props for Remotion
+    writeFileSync(propsPath, JSON.stringify(newSceneData, null, 2));
+    console.log(`[${jobId}] Props written to ${propsPath}`);
+
+    // Render with Remotion
+    console.log(`[${jobId}] Rendering with Remotion...`);
+
+    const remotionArgs = [
+      'remotion', 'render',
+      'src/remotion/index.tsx',
+      'DynamicAnimation',
+      outputPath,
+      '--props', propsPath,
+      '--frames', `0-${totalDuration - 1}`,
+      '--fps', String(fps),
+      '--width', String(width),
+      '--height', String(height),
+      '--codec', 'h264',
+      '--overwrite',
+    ];
+
+    await new Promise((resolve, reject) => {
+      const proc = spawn('npx', remotionArgs, {
+        cwd: process.cwd(),
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      let stderr = '';
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+        console.log(`[${jobId}] Remotion: ${data.toString().trim()}`);
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`Remotion render failed with code ${code}: ${stderr}`));
+        }
+      });
+
+      proc.on('error', (err) => {
+        reject(new Error(`Failed to start Remotion: ${err.message}`));
+      });
+    });
+
+    // Generate thumbnail
+    await runFFmpeg([
+      '-y', '-i', outputPath,
+      '-vf', 'scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2',
+      '-frames:v', '1',
+      thumbPath
+    ], jobId);
+
+    // Clean up props file
+    try {
+      unlinkSync(propsPath);
+    } catch (e) {}
+
+    const { stat } = await import('fs/promises');
+    const stats = await stat(outputPath);
+
+    // Update the existing asset entry IN-PLACE (no new asset, prevents asset creep)
+    originalAsset.duration = durationInSeconds;
+    originalAsset.size = stats.size;
+    originalAsset.thumbPath = existsSync(thumbPath) ? thumbPath : null;
+    originalAsset.sceneCount = newSceneData.scenes.length;
+    originalAsset.sceneDataPath = existingSceneDataPath;
+    originalAsset.sceneData = newSceneData;
+    originalAsset.lastEditedAt = Date.now();
+    originalAsset.lastEditPrompt = editPrompt;
+    // Keep original description but track edit history
+    originalAsset.editCount = (originalAsset.editCount || 0) + 1;
+
+    console.log(`[${jobId}] ========================================`);
+    console.log(`[${jobId}] Animation updated IN-PLACE successfully!`);
+    console.log(`[${jobId}] SAME asset ID: ${assetId}`);
+    console.log(`[${jobId}] Duration: ${durationInSeconds}s`);
+    console.log(`[${jobId}] Edit count: ${originalAsset.editCount}`);
+    console.log(`[${jobId}] Total assets in session: ${session.assets.size}`);
+    console.log(`[${jobId}] === EDIT COMPLETE ===`);
+    console.log(`[${jobId}] ========================================\n`);
+
+    const responseData = {
+      success: true,
+      assetId: assetId, // Same asset ID - no new asset created
+      filename: originalAsset.filename,
+      duration: durationInSeconds,
+      sceneCount: newSceneData.scenes.length,
+      editCount: originalAsset.editCount,
+      thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail?t=${Date.now()}`, // Cache bust
+      streamUrl: `/session/${sessionId}/assets/${assetId}/stream?t=${Date.now()}`, // Cache bust
+    };
+
+    console.log(`[${jobId}] Sending response:`, JSON.stringify(responseData, null, 2));
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify(responseData));
+
+  } catch (error) {
+    console.error('Animation edit error:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
 // Analyze video for animation concept (no rendering - for approval workflow)
 // Returns transcript and proposed animation scenes for user approval
 async function handleAnalyzeForAnimation(req, res, sessionId) {
@@ -3485,7 +3978,10 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
 
   try {
     const body = await parseBody(req);
-    const { assetId, type = 'intro', description } = body;
+    const { assetId, type = 'intro', description, startTime, endTime } = body;
+
+    // Debug: log received time range values
+    console.log(`[DEBUG] Received analyze request - startTime: ${startTime} (${typeof startTime}), endTime: ${endTime} (${typeof endTime})`);
 
     // Get the video asset to analyze
     let videoAsset;
@@ -3509,18 +4005,30 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
     const jobId = randomUUID();
     const audioPath = join(TEMP_DIR, `${jobId}-audio.mp3`);
 
+    // Determine if we're analyzing a specific time range or the whole video
+    const hasTimeRange = typeof startTime === 'number' && typeof endTime === 'number';
+    const segmentStart = hasTimeRange ? startTime : 0;
+    const segmentDuration = hasTimeRange ? (endTime - startTime) : null;
+
     console.log(`\n[${jobId}] === ANALYZE VIDEO FOR ${type.toUpperCase()} ANIMATION ===`);
     console.log(`[${jobId}] Analyzing video: ${videoAsset.filename}`);
+    if (hasTimeRange) {
+      console.log(`[${jobId}] Time range: ${segmentStart.toFixed(1)}s - ${endTime.toFixed(1)}s (${segmentDuration.toFixed(1)}s segment)`);
+    }
 
-    // Step 1: Transcribe the video
-    console.log(`[${jobId}] Step 1: Transcribing video...`);
+    // Step 1: Transcribe the video (or just the specified segment)
+    console.log(`[${jobId}] Step 1: Transcribing ${hasTimeRange ? 'segment' : 'video'}...`);
 
-    // Extract audio from video
-    await runFFmpeg([
-      '-y', '-i', videoAsset.path,
-      '-vn', '-acodec', 'libmp3lame', '-ar', '16000', '-ac', '1', '-q:a', '9',
-      audioPath
-    ], jobId);
+    // Extract audio from video - optionally just from the specified time range
+    const ffmpegArgs = ['-y', '-i', videoAsset.path];
+    if (hasTimeRange) {
+      // Use -ss for seeking and -t for duration to extract only the segment
+      ffmpegArgs.push('-ss', segmentStart.toString());
+      ffmpegArgs.push('-t', segmentDuration.toString());
+    }
+    ffmpegArgs.push('-vn', '-acodec', 'libmp3lame', '-ar', '16000', '-ac', '1', '-q:a', '9', audioPath);
+
+    await runFFmpeg(ffmpegArgs, jobId);
 
     // Get video duration
     const durationOutput = await runFFmpegProbe([
@@ -3530,6 +4038,7 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
       videoAsset.path
     ], jobId);
     const totalDuration = parseFloat(durationOutput.trim()) || 60;
+    const analyzedDuration = hasTimeRange ? segmentDuration : totalDuration;
 
     let transcription;
     const hasLocalWhisper = await checkLocalWhisper();
@@ -3579,7 +4088,7 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
           role: 'user',
           parts: [
             { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-            { text: `Transcribe this audio. Return ONLY the text content. Duration: ${totalDuration.toFixed(1)}s` }
+            { text: `Transcribe this audio. Return ONLY the text content. Duration: ${analyzedDuration.toFixed(1)}s` }
           ]
         }],
       });
@@ -3628,10 +4137,16 @@ The highlight should:
 - Be 3-6 seconds (90-180 frames at 30fps)`,
     };
 
+    // Build time context for the prompt
+    const timeContext = hasTimeRange
+      ? `\nNOTE: This transcript is from a SPECIFIC SEGMENT of the video (${segmentStart.toFixed(1)}s - ${endTime.toFixed(1)}s, duration: ${segmentDuration.toFixed(1)}s). Create an animation that relates ONLY to what is being discussed in this segment, not the entire video.`
+      : '';
+
     const scenePrompt = `You are a motion graphics designer. Analyze this video transcript and create a contextual ${type} animation concept.
 
 VIDEO TRANSCRIPT:
 "${transcription.text}"
+${timeContext}
 
 ${description ? `USER HINT: "${description}"` : ''}
 
@@ -3748,7 +4263,14 @@ async function handleRenderFromConcept(req, res, sessionId) {
       scenes: concept.scenes,
       backgroundColor: concept.backgroundColor || '#0a0a0a',
       totalDuration: concept.totalDuration,
+      contentSummary: concept.contentSummary,
+      keyTopics: concept.keyTopics,
     };
+
+    // Save scene data for future editing (reusable path based on asset ID)
+    const sceneDataPath = join(session.dir, `${assetId}-scenes.json`);
+    writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
+    console.log(`[${jobId}] Scene data saved to ${sceneDataPath} for future editing`);
 
     const animationTotalDuration = sceneData.totalDuration || sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
     const durationInSeconds = animationTotalDuration / fps;
@@ -3824,7 +4346,7 @@ async function handleRenderFromConcept(req, res, sessionId) {
     const { stat } = await import('fs/promises');
     const stats = await stat(outputPath);
 
-    // Create asset entry
+    // Create asset entry with scene data for future editing
     const asset = {
       id: assetId,
       type: 'video',
@@ -3841,6 +4363,8 @@ async function handleRenderFromConcept(req, res, sessionId) {
       animationType: concept.type,
       contentSummary: concept.contentSummary,
       sceneCount: concept.scenes.length,
+      sceneDataPath, // Store path to scene data for re-editing
+      sceneData, // Also keep in memory for quick access
     };
 
     session.assets.set(assetId, asset);
@@ -4099,7 +4623,14 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
       scenes,
       backgroundColor: '#0a0a0a',
       totalDuration: animationTotalDuration,
+      contentSummary: `Kinetic typography animation from transcript: "${transcription.text.substring(0, 100)}..."`,
+      keyTopics: keyPhrases.map(p => p.phrase),
     };
+
+    // Save scene data for future editing (persistent path based on asset ID)
+    const sceneDataPath = join(session.dir, `${assetId}-scenes.json`);
+    writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
+    console.log(`[${jobId}] Scene data saved to ${sceneDataPath} for future editing`);
 
     writeFileSync(propsPath, JSON.stringify(sceneData, null, 2));
 
@@ -4155,7 +4686,7 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
     const { stat } = await import('fs/promises');
     const stats = await stat(outputPath);
 
-    // Create asset entry
+    // Create asset entry with scene data for future editing
     const asset = {
       id: assetId,
       type: 'video',
@@ -4170,6 +4701,9 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
       aiGenerated: true,
       transcriptAnimation: true,
       phraseCount: keyPhrases.length,
+      sceneCount: scenes.length,
+      sceneDataPath, // Store path to scene data for re-editing
+      sceneData, // Also keep in memory for quick access
     };
 
     session.assets.set(assetId, asset);
@@ -4424,6 +4958,11 @@ Use specific terms, concepts, and themes from the transcript.`;
     const animationTotalDuration = sceneData.totalDuration || sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
     const durationInSeconds = animationTotalDuration / fps;
 
+    // Save scene data for future editing (persistent path based on asset ID)
+    const sceneDataPath = join(session.dir, `${outputAssetId}-scenes.json`);
+    writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
+    console.log(`[${jobId}] Scene data saved to ${sceneDataPath} for future editing`);
+
     // Step 3: Write props and render with Remotion
     console.log(`[${jobId}] Step 3: Rendering with Remotion...`);
 
@@ -4491,6 +5030,7 @@ Use specific terms, concepts, and themes from the transcript.`;
     const stats = await stat(outputPath);
 
     // Create asset entry
+    // Create asset entry with scene data for future editing
     const asset = {
       id: outputAssetId,
       type: 'video',
@@ -4509,6 +5049,8 @@ Use specific terms, concepts, and themes from the transcript.`;
       contentSummary: sceneData.contentSummary,
       sceneCount: sceneData.scenes.length,
       sourceAssetId: videoAsset.id,
+      sceneDataPath, // Store path to scene data for re-editing
+      sceneData, // Also keep in memory for quick access
     };
 
     session.assets.set(outputAssetId, asset);
@@ -4782,6 +5324,10 @@ const server = http.createServer(async (req, res) => {
     // Transcript animation - kinetic typography from speech
     else if (req.method === 'POST' && action === 'generate-transcript-animation') {
       await handleGenerateTranscriptAnimation(req, res, sessionId);
+    }
+    // Edit existing animation with new prompt
+    else if (req.method === 'POST' && action === 'edit-animation') {
+      await handleEditAnimation(req, res, sessionId);
     }
     // Process asset with FFmpeg command
     else if (req.method === 'POST' && action === 'process-asset') {

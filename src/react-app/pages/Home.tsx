@@ -67,11 +67,9 @@ export default function Home() {
     createTimelineTab,
     switchTimelineTab,
     closeTimelineTab,
-    updateTabClips: _updateTabClips,
+    updateTabClips,
+    updateTabAsset,
   } = useProject();
-
-  // Suppress unused warning - will be used when implementing edit tab clip operations
-  void _updateTabClips;
 
   // Compute the active clips based on which tab is selected
   const activeClips = useMemo(() => {
@@ -303,37 +301,110 @@ export default function Home() {
     }
 
     // Images need a default duration (5 seconds) since they don't have inherent duration
-    const clipDuration = asset.type === 'image' ? 5 : undefined;
-    addClip(asset.id, targetTrackId, time, clipDuration);
+    const clipDuration = asset.type === 'image' ? 5 : asset.duration;
+
+    // Check if we're on an edit tab (not main)
+    if (activeTabId !== 'main') {
+      // Add clip to the edit tab's clips array
+      const activeTab = timelineTabs.find(tab => tab.id === activeTabId);
+      if (activeTab) {
+        const newClip: TimelineClip = {
+          id: crypto.randomUUID(),
+          assetId: asset.id,
+          trackId: targetTrackId,
+          start: time,
+          duration: clipDuration || 5,
+          inPoint: 0,
+          outPoint: clipDuration || 5,
+        };
+        updateTabClips(activeTabId, [...activeTab.clips, newClip]);
+        console.log('Added clip to edit tab:', activeTabId, newClip);
+      }
+    } else {
+      // Add clip to main timeline
+      addClip(asset.id, targetTrackId, time, clipDuration);
+    }
     saveProject();
-  }, [addClip, saveProject]);
+  }, [addClip, saveProject, activeTabId, timelineTabs, updateTabClips]);
 
   // Handle moving clip
   const handleMoveClip = useCallback((clipId: string, newStart: number, newTrackId?: string) => {
-    moveClip(clipId, newStart, newTrackId);
-  }, [moveClip]);
+    // Check if we're on an edit tab
+    if (activeTabId !== 'main') {
+      const activeTab = timelineTabs.find(tab => tab.id === activeTabId);
+      if (activeTab) {
+        const updatedClips = activeTab.clips.map(clip => {
+          if (clip.id === clipId) {
+            return {
+              ...clip,
+              start: newStart,
+              trackId: newTrackId || clip.trackId,
+            };
+          }
+          return clip;
+        });
+        updateTabClips(activeTabId, updatedClips);
+      }
+    } else {
+      moveClip(clipId, newStart, newTrackId);
+    }
+  }, [moveClip, activeTabId, timelineTabs, updateTabClips]);
 
   // Handle resizing clip
   const handleResizeClip = useCallback((clipId: string, newInPoint: number, newOutPoint: number, newStart?: number) => {
-    const clip = clips.find(c => c.id === clipId);
-    if (!clip) return;
-
     const newDuration = newOutPoint - newInPoint;
-    updateClip(clipId, {
-      inPoint: newInPoint,
-      outPoint: newOutPoint,
-      duration: newDuration,
-      start: newStart ?? clip.start,
-    });
-  }, [clips, updateClip]);
+
+    // Check if we're on an edit tab
+    if (activeTabId !== 'main') {
+      const activeTab = timelineTabs.find(tab => tab.id === activeTabId);
+      if (activeTab) {
+        const clip = activeTab.clips.find(c => c.id === clipId);
+        if (!clip) return;
+
+        const updatedClips = activeTab.clips.map(c => {
+          if (c.id === clipId) {
+            return {
+              ...c,
+              inPoint: newInPoint,
+              outPoint: newOutPoint,
+              duration: newDuration,
+              start: newStart ?? c.start,
+            };
+          }
+          return c;
+        });
+        updateTabClips(activeTabId, updatedClips);
+      }
+    } else {
+      const clip = clips.find(c => c.id === clipId);
+      if (!clip) return;
+
+      updateClip(clipId, {
+        inPoint: newInPoint,
+        outPoint: newOutPoint,
+        duration: newDuration,
+        start: newStart ?? clip.start,
+      });
+    }
+  }, [clips, updateClip, activeTabId, timelineTabs, updateTabClips]);
 
   // Handle deleting clip from timeline (with autoSnap/ripple support)
   const handleDeleteClip = useCallback((clipId: string) => {
-    deleteClip(clipId, autoSnap);
+    // Check if we're on an edit tab
+    if (activeTabId !== 'main') {
+      const activeTab = timelineTabs.find(tab => tab.id === activeTabId);
+      if (activeTab) {
+        const updatedClips = activeTab.clips.filter(c => c.id !== clipId);
+        updateTabClips(activeTabId, updatedClips);
+      }
+    } else {
+      deleteClip(clipId, autoSnap);
+    }
+
     if (selectedClipId === clipId) {
       setSelectedClipId(null);
     }
-  }, [deleteClip, selectedClipId, autoSnap]);
+  }, [deleteClip, selectedClipId, autoSnap, activeTabId, timelineTabs, updateTabClips]);
 
   // Handle cutting clips at the playhead position
   const handleCutAtPlayhead = useCallback(() => {
@@ -966,23 +1037,42 @@ export default function Home() {
   }, [session, currentTime, addClip, saveProject, refreshAssets, switchTimelineTab]);
 
   // Handle custom AI-generated animation creation
-  const handleCreateCustomAnimation = useCallback(async (description: string) => {
+  const handleCreateCustomAnimation = useCallback(async (description: string, startTime?: number, endTime?: number) => {
     if (!session?.sessionId) {
       throw new Error('Please upload a video first to start a session');
     }
 
     try {
-      // Detect animation type from description
-      const lower = description.toLowerCase();
-      const isIntro = lower.includes('intro') || lower.includes('opening') || lower.includes('start');
-      const isOutro = lower.includes('outro') || lower.includes('ending') || lower.includes('conclusion') || lower.includes('close');
+      // Find the primary video asset to use as context for the animation
+      // First check V1 clips, then fall back to first video asset
+      const v1Clips = clips.filter(c => c.trackId === 'V1');
+      let videoAssetId: string | undefined;
 
-      // Call the server to generate AI animation
+      if (v1Clips.length > 0) {
+        const v1Asset = assets.find(a => a.id === v1Clips[0].assetId && a.type === 'video');
+        if (v1Asset) {
+          videoAssetId = v1Asset.id;
+        }
+      }
+
+      if (!videoAssetId) {
+        const firstVideo = assets.find(a => a.type === 'video' && !a.aiGenerated);
+        if (firstVideo) {
+          videoAssetId = firstVideo.id;
+        }
+      }
+
+      console.log(`[Animation] Creating with video context: ${videoAssetId || 'none'}, time range: ${startTime !== undefined ? `${startTime}s` : 'auto'}${endTime !== undefined ? ` - ${endTime}s` : ''}`);
+
+      // Call the server to generate AI animation with video context
       const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-animation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           description,
+          videoAssetId, // Pass video for transcript context
+          startTime,    // Optional: specific time range
+          endTime,      // Optional: specific time range
           fps: 30,
           width: 1920,
           height: 1080,
@@ -1000,29 +1090,41 @@ export default function Home() {
       await refreshAssets();
 
       const animationDuration = data.duration;
-      const videoDuration = getDuration();
 
-      // Always add animations as overlays on V2 - never shift the original video
-      if (isIntro) {
-        // For intro: Add as overlay at the beginning
-        addClip(data.assetId, 'V2', 0, animationDuration);
-        console.log('Intro animation added as overlay at beginning');
-      } else if (isOutro) {
-        // For outro: Add as overlay at the end of the video
-        addClip(data.assetId, 'V2', videoDuration, animationDuration);
-        console.log('Outro animation added as overlay at end');
+      // If startTime is provided (from time selection tool), use that
+      // Otherwise, detect animation type from description for placement
+      let insertTime: number;
+      if (startTime !== undefined) {
+        insertTime = startTime;
+        console.log(`Animation added at specified time: ${startTime}s`);
       } else {
-        // For other animations: Overlay on V2 at current playhead position
-        addClip(data.assetId, 'V2', currentTime, animationDuration);
-        console.log('Animation added as overlay at playhead position');
+        // Detect animation type from description for auto-placement
+        const lower = description.toLowerCase();
+        const isIntro = lower.includes('intro') || lower.includes('opening') || lower.includes('start');
+        const isOutro = lower.includes('outro') || lower.includes('ending') || lower.includes('conclusion') || lower.includes('close');
+        const videoDuration = getDuration();
+
+        if (isIntro) {
+          insertTime = 0;
+          console.log('Intro animation added as overlay at beginning');
+        } else if (isOutro) {
+          insertTime = videoDuration;
+          console.log('Outro animation added as overlay at end');
+        } else {
+          insertTime = currentTime;
+          console.log('Animation added as overlay at playhead position');
+        }
       }
+
+      // Always add animations as overlays on V2
+      addClip(data.assetId, 'V2', insertTime, animationDuration);
 
       // Switch to Main tab so user can see the added animation
       switchTimelineTab('main');
 
       await saveProject();
 
-      console.log('Custom animation generated:', data, { isIntro, isOutro });
+      console.log('Custom animation generated:', data, { insertTime });
 
       return {
         assetId: data.assetId,
@@ -1032,12 +1134,13 @@ export default function Home() {
       console.error('Failed to create custom animation:', error);
       throw error;
     }
-  }, [session, currentTime, addClip, saveProject, refreshAssets, getDuration, switchTimelineTab]);
+  }, [session, currentTime, addClip, saveProject, refreshAssets, getDuration, switchTimelineTab, clips, assets]);
 
   // Handle analyzing video for animation (returns concept for approval)
   const handleAnalyzeForAnimation = useCallback(async (request: {
     type: 'intro' | 'outro' | 'transition' | 'highlight';
     description?: string;
+    timeRange?: { start: number; end: number };
   }) => {
     if (!session?.sessionId) {
       throw new Error('Please upload a video first to start a session');
@@ -1048,6 +1151,9 @@ export default function Home() {
       throw new Error('Please upload a video first');
     }
 
+    // Debug: log the time range being sent to server
+    console.log('[DEBUG] Sending analyze-for-animation with timeRange:', JSON.stringify(request.timeRange));
+
     const response = await fetch(`http://localhost:3333/session/${session.sessionId}/analyze-for-animation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1055,6 +1161,9 @@ export default function Home() {
         assetId: videoAsset.id,
         type: request.type,
         description: request.description,
+        // Pass time range so server only analyzes that segment
+        startTime: request.timeRange?.start,
+        endTime: request.timeRange?.end,
       }),
     });
 
@@ -1079,6 +1188,7 @@ export default function Home() {
     durationInSeconds: number;
     backgroundColor: string;
     contentSummary: string;
+    startTime?: number; // Optional: explicit placement time
   }) => {
     if (!session?.sessionId) {
       throw new Error('Please upload a video first to start a session');
@@ -1108,34 +1218,38 @@ export default function Home() {
     const animationDuration = data.duration;
     const videoDuration = getDuration();
 
-    if (concept.type === 'intro') {
-      // For intro: Shift all existing clips forward, then add animation at 0
-      const existingClips = clips.filter(c => c.trackId === 'V1' || c.trackId === 'V2' || c.trackId === 'V3');
-      for (const clip of existingClips) {
-        updateClip(clip.id, { start: clip.start + animationDuration });
-      }
-      // Add intro animation to V1 at the beginning
-      addClip(data.assetId, 'V1', 0, animationDuration);
-      console.log('Intro animation added at beginning, shifted existing clips forward');
+    // Determine placement: use explicit startTime if provided, otherwise use type-based logic
+    let insertTime: number;
+    if (concept.startTime !== undefined) {
+      // Explicit time provided (from time selection tool)
+      insertTime = concept.startTime;
+      console.log(`Animation placed at specified time: ${insertTime}s`);
+    } else if (concept.type === 'intro') {
+      insertTime = 0;
+      console.log('Intro animation added at beginning');
     } else if (concept.type === 'outro') {
-      // For outro: Add animation at the end of the video
-      addClip(data.assetId, 'V1', videoDuration, animationDuration);
-      console.log('Outro animation added at end of video');
+      insertTime = videoDuration;
+      console.log('Outro animation added at end');
     } else {
-      // For transitions/highlights: Overlay on V2 at current playhead
-      addClip(data.assetId, 'V2', currentTime, animationDuration);
-      console.log('Animation added as overlay at playhead position');
+      insertTime = currentTime;
+      console.log('Animation added at current playhead');
     }
+
+    // Always add as overlay on V2 - never shift the original video
+    addClip(data.assetId, 'V2', insertTime, animationDuration);
+
+    // Switch to Main tab so user can see the animation
+    switchTimelineTab('main');
 
     await saveProject();
 
-    console.log('Animation rendered from concept:', data, { type: concept.type });
+    console.log('Animation rendered from concept:', data, { type: concept.type, insertTime });
 
     return {
       assetId: data.assetId,
       duration: data.duration,
     };
-  }, [session, clips, currentTime, refreshAssets, addClip, updateClip, saveProject, getDuration]);
+  }, [session, currentTime, refreshAssets, addClip, saveProject, getDuration, switchTimelineTab]);
 
   // Handle generating transcript animation (kinetic typography from speech)
   const handleGenerateTranscriptAnimation = useCallback(async () => {
@@ -1262,6 +1376,87 @@ export default function Home() {
       alert(`Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }, [clips.length, renderProject]);
+
+  // Edit an existing animation with a new prompt
+  const handleEditAnimation = useCallback(async (
+    assetId: string,
+    editPrompt: string,
+    v1Context?: { assetId: string; filename: string; type: string; duration?: number },
+    tabIdToUpdate?: string
+  ) => {
+    if (!session?.sessionId) {
+      throw new Error('No active session');
+    }
+
+    // Get available assets to pass to the AI
+    const availableAssets = assets
+      .filter(a => a.type === 'image' || a.type === 'video')
+      .map(a => ({
+        id: a.id,
+        type: a.type,
+        filename: a.filename,
+        duration: a.duration,
+      }));
+
+    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/edit-animation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assetId,
+        editPrompt,
+        assets: availableAssets,
+        v1Context, // Pass V1 clip context for hybrid approach
+        fps: 30,
+        width: 1920,
+        height: 1080,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to edit animation');
+    }
+
+    const data = await response.json();
+
+    console.log('[handleEditAnimation] ===== STEP 1: Server response =====');
+    console.log('[handleEditAnimation] Server response:', {
+      assetId: data.assetId,
+      originalAssetId: assetId,
+      isSameAsset: data.assetId === assetId,
+      duration: data.duration,
+      editCount: data.editCount,
+    });
+
+    console.log('[handleEditAnimation] ===== STEP 2: About to call refreshAssets =====');
+    console.log('[handleEditAnimation] Tab to update:', tabIdToUpdate);
+
+    // Refresh assets to sync with server (same asset ID, but updated duration/thumbnail)
+    await refreshAssets();
+
+    console.log('[handleEditAnimation] ===== STEP 3: refreshAssets complete =====');
+
+    // Update the edit tab's clip duration if it changed (asset ID stays the same)
+    if (tabIdToUpdate && tabIdToUpdate !== 'main' && data.duration) {
+      console.log('[handleEditAnimation] ===== STEP 4: Updating edit tab =====');
+      console.log('[handleEditAnimation] Updating edit tab clip duration:', {
+        tabId: tabIdToUpdate,
+        assetId: data.assetId,
+        duration: data.duration,
+      });
+      // Update the V1 clip's duration to match the new animation duration
+      updateTabAsset(tabIdToUpdate, data.assetId, data.duration);
+    }
+
+    console.log('[handleEditAnimation] ===== STEP 5: Complete =====');
+
+    return {
+      assetId: data.assetId,
+      duration: data.duration,
+      sceneCount: data.sceneCount,
+      editCount: data.editCount,
+    };
+  }, [session, assets, refreshAssets, updateTabAsset]);
 
   // Open an animation in a new timeline tab for isolated editing
   const handleOpenAnimationInTab = useCallback((assetId: string, animationName: string) => {
@@ -1559,6 +1754,7 @@ export default function Home() {
                 onGenerateTranscriptAnimation={handleGenerateTranscriptAnimation}
                 onCreateContextualAnimation={handleCreateContextualAnimation}
                 onOpenAnimationInTab={handleOpenAnimationInTab}
+                onEditAnimation={handleEditAnimation}
                 isApplying={isProcessing}
                 applyProgress={0}
                 applyStatus={currentStatus}
@@ -1568,6 +1764,9 @@ export default function Home() {
                 assets={assets}
                 currentTime={currentTime}
                 selectedClipId={selectedClipId}
+                activeTabId={activeTabId}
+                editTabAssetId={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.assetId : undefined}
+                editTabClips={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.clips : undefined}
               />
             </div>
           </div>

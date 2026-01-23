@@ -14,6 +14,7 @@ export interface Asset {
   height?: number;
   thumbnailUrl: string | null;
   streamUrl?: string; // URL with cache-busting timestamp
+  aiGenerated?: boolean; // True if this is a Remotion-generated animation
 }
 
 // TimelineClip - instance on timeline
@@ -136,6 +137,19 @@ export function useProject() {
     { id: 'main', name: 'Main', type: 'main', clips: [] }
   ]);
   const [activeTabId, setActiveTabId] = useState('main');
+
+  // DEBUG: Track when activeTabId changes
+  const prevActiveTabIdRef = useRef(activeTabId);
+  useEffect(() => {
+    if (prevActiveTabIdRef.current !== activeTabId) {
+      console.log('=================================================');
+      console.log('[useProject] ⚠️ activeTabId CHANGED!');
+      console.log(`  FROM: "${prevActiveTabIdRef.current}" TO: "${activeTabId}"`);
+      console.log('=================================================');
+      console.trace('[useProject] Stack trace for activeTabId change:');
+      prevActiveTabIdRef.current = activeTabId;
+    }
+  }, [activeTabId]);
 
   const [settings, setSettings] = useState<ProjectSettings>({
     width: 1920,
@@ -333,6 +347,7 @@ export function useProject() {
       width?: number;
       height?: number;
       thumbnailUrl?: string | null;
+      aiGenerated?: boolean;
     }) => ({
       id: a.id,
       type: a.type,
@@ -346,6 +361,8 @@ export function useProject() {
         : null,
       // Add cache-busting timestamp to force reload after file changes (e.g., dead air removal)
       streamUrl: `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${a.id}/stream?v=${Date.now()}`,
+      // Preserve aiGenerated flag for Remotion-generated animations (critical for edit workflow detection)
+      aiGenerated: a.aiGenerated || false,
     }));
 
     setAssets(serverAssets);
@@ -362,11 +379,20 @@ export function useProject() {
     outPoint?: number
   ): TimelineClip => {
     const asset = assets.find(a => a.id === assetId);
-    if (!asset) throw new Error('Asset not found');
 
     // For images, use provided duration or default to 5 seconds
     // For video/audio, use asset duration
-    const clipDuration = duration ?? (asset.type === 'image' ? 5 : asset.duration);
+    // If asset not found (race condition with refreshAssets), use provided duration or default
+    let clipDuration: number;
+    if (duration !== undefined) {
+      clipDuration = duration;
+    } else if (asset) {
+      clipDuration = asset.type === 'image' ? 5 : asset.duration;
+    } else {
+      clipDuration = 5; // Default fallback
+      console.warn(`Asset ${assetId} not found in state, using default duration`);
+    }
+
     const clip: TimelineClip = {
       id: crypto.randomUUID(),
       assetId,
@@ -505,17 +531,27 @@ export function useProject() {
 
   // Switch to a different timeline tab
   const switchTimelineTab = useCallback((tabId: string): void => {
+    console.log('[switchTimelineTab] Switching to tab:', tabId);
+    console.trace('[switchTimelineTab] Call stack:');
     setActiveTabId(tabId);
   }, []);
 
   // Close a timeline tab (cannot close main)
   const closeTimelineTab = useCallback((tabId: string): void => {
+    console.log('[closeTimelineTab] Attempting to close tab:', tabId);
+    console.trace('[closeTimelineTab] Call stack:');
     if (tabId === 'main') return; // Cannot close main tab
 
     setTimelineTabs(prev => prev.filter(tab => tab.id !== tabId));
 
     // If closing the active tab, switch to main
-    setActiveTabId(currentId => currentId === tabId ? 'main' : currentId);
+    setActiveTabId(currentId => {
+      if (currentId === tabId) {
+        console.log('[closeTimelineTab] Active tab is being closed, switching to main');
+        return 'main';
+      }
+      return currentId;
+    });
   }, []);
 
   // Update clips in a specific tab
@@ -523,6 +559,58 @@ export function useProject() {
     setTimelineTabs(prev => prev.map(tab =>
       tab.id === tabId ? { ...tab, clips } : tab
     ));
+  }, []);
+
+  // Update a tab's animation asset (used when editing an animation - now in-place)
+  // This updates the V1 clip duration (asset ID stays the same for in-place edits)
+  const updateTabAsset = useCallback((tabId: string, newAssetId: string, newDuration: number): void => {
+    console.log('[updateTabAsset] Called with:', { tabId, newAssetId, newDuration });
+
+    setTimelineTabs(prev => {
+      const updatedTabs = prev.map(tab => {
+        if (tab.id !== tabId) return tab;
+
+        console.log('[updateTabAsset] Found tab to update:', {
+          tabId: tab.id,
+          currentAssetId: tab.assetId,
+          newAssetId,
+          isSameAsset: tab.assetId === newAssetId,
+        });
+
+        // Update the V1 clip to point to the new asset
+        const updatedClips = tab.clips.map(clip => {
+          if (clip.trackId === 'V1') {
+            console.log('[updateTabAsset] Updating V1 clip:', {
+              oldAssetId: clip.assetId,
+              newAssetId,
+              oldDuration: clip.duration,
+              newDuration,
+            });
+            return {
+              ...clip,
+              assetId: newAssetId,
+              duration: newDuration,
+              outPoint: newDuration,
+            };
+          }
+          return clip;
+        });
+
+        return {
+          ...tab,
+          assetId: newAssetId,
+          clips: updatedClips,
+        };
+      });
+
+      console.log('[updateTabAsset] Updated tabs:', updatedTabs.map(t => ({
+        id: t.id,
+        assetId: t.assetId,
+        clipCount: t.clips.length,
+      })));
+
+      return updatedTabs;
+    });
   }, []);
 
   // Get the active timeline tab
@@ -680,6 +768,7 @@ export function useProject() {
           width?: number;
           height?: number;
           thumbnailUrl?: string | null;
+          aiGenerated?: boolean;
         }) => ({
           id: a.id,
           type: a.type,
@@ -693,6 +782,8 @@ export function useProject() {
             : null,
           // Add cache-busting timestamp to force reload after file changes
           streamUrl: `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${a.id}/stream?v=${Date.now()}`,
+          // Preserve aiGenerated flag for Remotion-generated animations (critical for edit workflow detection)
+          aiGenerated: a.aiGenerated || false,
         }));
         setAssets(serverAssets);
       }
@@ -891,6 +982,7 @@ export function useProject() {
     switchTimelineTab,
     closeTimelineTab,
     updateTabClips,
+    updateTabAsset,
     getActiveTab,
   };
 }
