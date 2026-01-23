@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
-import { ZoomIn, ZoomOut, Play, Pause, SkipBack, Scissors, Trash2 } from 'lucide-react';
+import { ZoomIn, ZoomOut, Play, Pause, SkipBack, Scissors, Trash2, Type, RectangleHorizontal, RectangleVertical, Link, Unlink } from 'lucide-react';
 import TimelineClip from './TimelineClip';
 import type { Track, TimelineClip as TimelineClipType, Asset, CaptionData } from '@/react-app/hooks/useProject';
 
@@ -11,6 +11,7 @@ interface TimelineProps {
   currentTime: number;
   duration: number;
   isPlaying: boolean;
+  aspectRatio: '16:9' | '9:16';
   onSelectClip: (id: string | null) => void;
   onTimeChange: (time: number) => void;
   onPlayPause: () => void;
@@ -19,6 +20,10 @@ interface TimelineProps {
   onResizeClip: (clipId: string, newInPoint: number, newOutPoint: number, newStart?: number) => void;
   onDeleteClip: (clipId: string) => void;
   onCutAtPlayhead: () => void;
+  onAddText: () => void;
+  onToggleAspectRatio: () => void;
+  autoSnap?: boolean;
+  onToggleAutoSnap?: () => void;
   onDropAsset: (asset: Asset, trackId: string, time: number) => void;
   onSave: () => void;
   getCaptionData?: (clipId: string) => CaptionData | null;
@@ -44,6 +49,7 @@ export default function Timeline({
   currentTime,
   duration,
   isPlaying,
+  aspectRatio,
   onSelectClip,
   onTimeChange,
   onPlayPause,
@@ -52,6 +58,10 @@ export default function Timeline({
   onResizeClip,
   onDeleteClip,
   onCutAtPlayhead,
+  onAddText,
+  onToggleAspectRatio,
+  autoSnap = true,
+  onToggleAutoSnap,
   onDropAsset,
   onSave,
   getCaptionData,
@@ -258,6 +268,40 @@ export default function Timeline({
               title="Delete selected clip (Delete key)"
             >
               <Trash2 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={onAddText}
+              className="p-1.5 bg-zinc-700 hover:bg-zinc-600 rounded transition-colors"
+              title="Add text overlay"
+            >
+              <Type className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={onToggleAspectRatio}
+              className="p-1.5 bg-zinc-700 hover:bg-zinc-600 rounded transition-colors"
+              title={`Switch to ${aspectRatio === '16:9' ? '9:16 (vertical)' : '16:9 (horizontal)'}`}
+            >
+              {aspectRatio === '16:9' ? (
+                <RectangleVertical className="w-3.5 h-3.5" />
+              ) : (
+                <RectangleHorizontal className="w-3.5 h-3.5" />
+              )}
+            </button>
+            <div className="w-px h-4 bg-zinc-600" />
+            <button
+              onClick={onToggleAutoSnap}
+              className={`p-1.5 rounded transition-colors ${
+                autoSnap
+                  ? 'bg-orange-500/20 text-orange-400 hover:bg-orange-500/30'
+                  : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-400'
+              }`}
+              title={autoSnap ? 'Auto-snap ON: Clips shift when deleting' : 'Auto-snap OFF: Gaps remain when deleting'}
+            >
+              {autoSnap ? (
+                <Link className="w-3.5 h-3.5" />
+              ) : (
+                <Unlink className="w-3.5 h-3.5" />
+              )}
             </button>
           </div>
 

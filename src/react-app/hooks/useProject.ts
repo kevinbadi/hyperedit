@@ -1,6 +1,7 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 
 const LOCAL_FFMPEG_URL = 'http://localhost:3333';
+const SESSION_STORAGE_KEY = 'clipwise-session';
 
 // Asset - source file in library
 export interface Asset {
@@ -12,6 +13,7 @@ export interface Asset {
   width?: number;
   height?: number;
   thumbnailUrl: string | null;
+  streamUrl?: string; // URL with cache-busting timestamp
 }
 
 // TimelineClip - instance on timeline
@@ -61,7 +63,7 @@ export interface CaptionStyle {
   strokeColor?: string;
   strokeWidth?: number;
   position: 'bottom' | 'center' | 'top';
-  animation: 'none' | 'karaoke' | 'fade' | 'pop' | 'bounce';
+  animation: 'none' | 'karaoke' | 'fade' | 'pop' | 'bounce' | 'typewriter';
   highlightColor?: string;
   timeOffset?: number; // Offset in seconds to adjust sync (negative = earlier, positive = later)
 }
@@ -86,14 +88,37 @@ export interface ProjectState {
   settings: ProjectSettings;
 }
 
+// Timeline tab for editing clips in isolation
+export interface TimelineTab {
+  id: string;
+  name: string;
+  type: 'main' | 'clip';
+  assetId?: string; // For clip tabs, the asset being edited
+  clips: TimelineClip[];
+}
+
 // Session info
 export interface SessionInfo {
   sessionId: string;
   createdAt: number;
 }
 
+// Helper to load session from localStorage
+function loadSessionFromStorage(): SessionInfo | null {
+  try {
+    const stored = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (stored) {
+      return JSON.parse(stored);
+    }
+  } catch (e) {
+    console.error('Failed to load session from storage:', e);
+  }
+  return null;
+}
+
 export function useProject() {
-  const [session, setSession] = useState<SessionInfo | null>(null);
+  // Initialize session from localStorage if available
+  const [session, setSessionInternal] = useState<SessionInfo | null>(loadSessionFromStorage);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [tracks, setTracks] = useState<Track[]>([
     { id: 'T1', type: 'text', name: 'T1', order: 0 },   // Captions/text track (top)
@@ -105,6 +130,13 @@ export function useProject() {
   ]);
   const [clips, setClips] = useState<TimelineClip[]>([]);
   const [captionData, setCaptionData] = useState<Record<string, CaptionData>>({});
+
+  // Timeline tabs for editing clips in isolation
+  const [timelineTabs, setTimelineTabs] = useState<TimelineTab[]>([
+    { id: 'main', name: 'Main', type: 'main', clips: [] }
+  ]);
+  const [activeTabId, setActiveTabId] = useState('main');
+
   const [settings, setSettings] = useState<ProjectSettings>({
     width: 1920,
     height: 1080,
@@ -115,6 +147,29 @@ export function useProject() {
   const [serverAvailable, setServerAvailable] = useState<boolean | null>(null);
 
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Refs to track latest state values for saveProject (avoids stale closure issues)
+  const tracksRef = useRef(tracks);
+  const clipsRef = useRef(clips);
+  const settingsRef = useRef(settings);
+
+  // Keep refs in sync with state
+  useEffect(() => { tracksRef.current = tracks; }, [tracks]);
+  useEffect(() => { clipsRef.current = clips; }, [clips]);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
+
+  // Wrapper to persist session to localStorage
+  const setSession = useCallback((sessionOrUpdater: SessionInfo | null | ((prev: SessionInfo | null) => SessionInfo | null)) => {
+    setSessionInternal(prev => {
+      const newSession = typeof sessionOrUpdater === 'function' ? sessionOrUpdater(prev) : sessionOrUpdater;
+      if (newSession) {
+        localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(newSession));
+      } else {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+      }
+      return newSession;
+    });
+  }, []);
 
   // Check if local server is available
   const checkServer = useCallback(async (): Promise<boolean> => {
@@ -134,6 +189,35 @@ export function useProject() {
       return false;
     }
   }, [serverAvailable]);
+
+  // Validate stored session on mount - clear if server doesn't recognize it
+  useEffect(() => {
+    const validateSession = async () => {
+      if (!session) return;
+
+      try {
+        const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/project`, {
+          method: 'GET',
+          signal: AbortSignal.timeout(3000)
+        });
+
+        if (response.status === 404) {
+          // Session no longer exists on server - clear it
+          console.log('Stored session is invalid, clearing...');
+          localStorage.removeItem(SESSION_STORAGE_KEY);
+          setSessionInternal(null);
+          setAssets([]);
+          setClips([]);
+          setCaptionData({});
+        }
+      } catch (error) {
+        // Server might be down - don't clear session yet
+        console.log('Could not validate session:', error);
+      }
+    };
+
+    validateSession();
+  }, []); // Only run once on mount
 
   // Create a new session
   const createSession = useCallback(async (): Promise<SessionInfo> => {
@@ -230,6 +314,44 @@ export function useProject() {
     return `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${assetId}/stream`;
   }, [session]);
 
+  // Refresh assets from server (useful after server-side asset generation)
+  const refreshAssets = useCallback(async (): Promise<Asset[]> => {
+    if (!session) return [];
+
+    const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets`);
+    if (!response.ok) {
+      throw new Error('Failed to fetch assets');
+    }
+
+    const data = await response.json();
+    const serverAssets: Asset[] = (data.assets || []).map((a: {
+      id: string;
+      type: 'video' | 'image' | 'audio';
+      filename: string;
+      duration: number;
+      size: number;
+      width?: number;
+      height?: number;
+      thumbnailUrl?: string | null;
+    }) => ({
+      id: a.id,
+      type: a.type,
+      filename: a.filename,
+      duration: a.duration,
+      size: a.size,
+      width: a.width,
+      height: a.height,
+      thumbnailUrl: a.thumbnailUrl
+        ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}`
+        : null,
+      // Add cache-busting timestamp to force reload after file changes (e.g., dead air removal)
+      streamUrl: `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${a.id}/stream?v=${Date.now()}`,
+    }));
+
+    setAssets(serverAssets);
+    return serverAssets;
+  }, [session]);
+
   // Add clip to timeline
   const addClip = useCallback((
     assetId: string,
@@ -266,9 +388,32 @@ export function useProject() {
     ));
   }, []);
 
-  // Delete clip
-  const deleteClip = useCallback((clipId: string): void => {
-    setClips(prev => prev.filter(c => c.id !== clipId));
+  // Delete clip (with optional ripple/autosnap to shift subsequent clips)
+  const deleteClip = useCallback((clipId: string, ripple: boolean = false): void => {
+    setClips(prev => {
+      const clipToDelete = prev.find(c => c.id === clipId);
+      if (!clipToDelete) return prev.filter(c => c.id !== clipId);
+
+      // Remove the clip
+      const filtered = prev.filter(c => c.id !== clipId);
+
+      if (!ripple) return filtered;
+
+      // Ripple mode: shift subsequent clips on the same track backward
+      const deletedEnd = clipToDelete.start + clipToDelete.duration;
+      const gapDuration = clipToDelete.duration;
+
+      return filtered.map(c => {
+        // Only shift clips on the same track that start at or after the deleted clip's end
+        if (c.trackId === clipToDelete.trackId && c.start >= deletedEnd) {
+          return {
+            ...c,
+            start: Math.max(0, c.start - gapDuration),
+          };
+        }
+        return c;
+      });
+    });
   }, []);
 
   // Move clip
@@ -340,6 +485,50 @@ export function useProject() {
 
     return secondClip.id;
   }, [clips]);
+
+  // Create a new timeline tab for editing a clip/animation in isolation
+  const createTimelineTab = useCallback((name: string, assetId: string, initialClips?: TimelineClip[]): string => {
+    const tabId = crypto.randomUUID();
+    const newTab: TimelineTab = {
+      id: tabId,
+      name,
+      type: 'clip',
+      assetId,
+      clips: initialClips || [],
+    };
+
+    setTimelineTabs(prev => [...prev, newTab]);
+    setActiveTabId(tabId);
+
+    return tabId;
+  }, []);
+
+  // Switch to a different timeline tab
+  const switchTimelineTab = useCallback((tabId: string): void => {
+    setActiveTabId(tabId);
+  }, []);
+
+  // Close a timeline tab (cannot close main)
+  const closeTimelineTab = useCallback((tabId: string): void => {
+    if (tabId === 'main') return; // Cannot close main tab
+
+    setTimelineTabs(prev => prev.filter(tab => tab.id !== tabId));
+
+    // If closing the active tab, switch to main
+    setActiveTabId(currentId => currentId === tabId ? 'main' : currentId);
+  }, []);
+
+  // Update clips in a specific tab
+  const updateTabClips = useCallback((tabId: string, clips: TimelineClip[]): void => {
+    setTimelineTabs(prev => prev.map(tab =>
+      tab.id === tabId ? { ...tab, clips } : tab
+    ));
+  }, []);
+
+  // Get the active timeline tab
+  const getActiveTab = useCallback((): TimelineTab | undefined => {
+    return timelineTabs.find(tab => tab.id === activeTabId);
+  }, [timelineTabs, activeTabId]);
 
   // Default caption style
   const defaultCaptionStyle: CaptionStyle = {
@@ -445,6 +634,7 @@ export function useProject() {
   }, [captionData]);
 
   // Save project to server (debounced)
+  // Uses refs to always get latest state, avoiding stale closure issues
   const saveProject = useCallback(async (): Promise<void> => {
     if (!session) return;
 
@@ -453,30 +643,66 @@ export function useProject() {
       clearTimeout(saveTimeoutRef.current);
     }
 
-    // Debounce saves
+    // Debounce saves - use refs to get latest state values
     saveTimeoutRef.current = setTimeout(async () => {
       try {
         await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/project`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tracks, clips, settings }),
+          body: JSON.stringify({
+            tracks: tracksRef.current,
+            clips: clipsRef.current,
+            settings: settingsRef.current,
+          }),
         });
         console.log('[Project] Saved');
       } catch (error) {
         console.error('[Project] Save failed:', error);
       }
     }, 500);
-  }, [session, tracks, clips, settings]);
+  }, [session]);
 
-  // Load project from server
+  // Load project from server (including assets)
   const loadProject = useCallback(async (): Promise<void> => {
     if (!session) return;
 
     try {
+      // Fetch assets first
+      const assetsResponse = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets`);
+      if (assetsResponse.ok) {
+        const assetsData = await assetsResponse.json();
+        const serverAssets: Asset[] = (assetsData.assets || []).map((a: {
+          id: string;
+          type: 'video' | 'image' | 'audio';
+          filename: string;
+          duration: number;
+          size: number;
+          width?: number;
+          height?: number;
+          thumbnailUrl?: string | null;
+        }) => ({
+          id: a.id,
+          type: a.type,
+          filename: a.filename,
+          duration: a.duration,
+          size: a.size,
+          width: a.width,
+          height: a.height,
+          thumbnailUrl: a.thumbnailUrl
+            ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}`
+            : null,
+          // Add cache-busting timestamp to force reload after file changes
+          streamUrl: `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${a.id}/stream?v=${Date.now()}`,
+        }));
+        setAssets(serverAssets);
+      }
+
+      // Then fetch project
       const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/project`);
       if (response.ok) {
         const data = await response.json();
-        if (data.tracks) setTracks(data.tracks);
+        // Don't load tracks from server - always use client's default tracks
+        // Server tracks may be outdated (e.g., missing T1, V3, A2)
         if (data.clips) setClips(data.clips);
         if (data.settings) setSettings(data.settings);
       }
@@ -486,6 +712,7 @@ export function useProject() {
   }, [session]);
 
   // Render project
+  // Uses refs to always get latest state
   const renderProject = useCallback(async (preview = false): Promise<string> => {
     if (!session) throw new Error('No session');
 
@@ -493,11 +720,15 @@ export function useProject() {
     setStatus(preview ? 'Rendering preview...' : 'Rendering export...');
 
     try {
-      // Save project first
+      // Save project first - use refs to get latest state
       await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/project`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tracks, clips, settings }),
+        body: JSON.stringify({
+          tracks: tracksRef.current,
+          clips: clipsRef.current,
+          settings: settingsRef.current,
+        }),
       });
 
       const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/render`, {
@@ -520,7 +751,7 @@ export function useProject() {
       setLoading(false);
       setTimeout(() => setStatus(''), 2000);
     }
-  }, [session, tracks, clips, settings]);
+  }, [session]);
 
   // Get total project duration
   const getDuration = useCallback((): number => {
@@ -624,6 +855,7 @@ export function useProject() {
     uploadAsset,
     deleteAsset,
     getAssetStreamUrl,
+    refreshAssets,
     createGif,
 
     // Clips
@@ -651,5 +883,14 @@ export function useProject() {
     setTracks,
     setClips,
     setSettings,
+
+    // Timeline tabs
+    timelineTabs,
+    activeTabId,
+    createTimelineTab,
+    switchTimelineTab,
+    closeTimelineTab,
+    updateTabClips,
+    getActiveTab,
   };
 }

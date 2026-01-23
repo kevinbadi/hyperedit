@@ -30,6 +30,7 @@ interface ClipLayer {
 interface VideoPreviewProps {
   layers?: ClipLayer[];
   isPlaying?: boolean;
+  aspectRatio?: '16:9' | '9:16';
   onLayerMove?: (layerId: string, x: number, y: number) => void;
   onLayerSelect?: (layerId: string) => void;
   selectedLayerId?: string | null;
@@ -82,11 +83,13 @@ function getTransformStyles(transform?: ClipTransform, zIndex: number = 0, isDra
 const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   layers = [],
   isPlaying = false,
+  aspectRatio = '16:9',
   onLayerMove,
   onLayerSelect,
   selectedLayerId,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const containerRef = useRef<HTMLDivElement>(null);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
@@ -145,6 +148,36 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [isPlaying]);
 
+  // Play/pause control for overlay videos (V2, V3, etc.)
+  useEffect(() => {
+    overlayVideoRefs.current.forEach((video) => {
+      if (isPlaying) {
+        video.play().catch(() => {});
+      } else {
+        video.pause();
+      }
+    });
+  }, [isPlaying]);
+
+  // Sync overlay video seeking when scrubbing
+  useEffect(() => {
+    if (isPlaying) return; // Don't interfere during playback
+
+    // Find overlay video layers and sync their time
+    const overlayVideoLayers = layers.filter(
+      l => l.type === 'video' && l.trackId !== 'V1'
+    );
+
+    overlayVideoLayers.forEach((layer) => {
+      const video = overlayVideoRefs.current.get(layer.id);
+      if (video && layer.clipTime !== undefined) {
+        if (Math.abs(video.currentTime - layer.clipTime) > 0.1) {
+          video.currentTime = layer.clipTime;
+        }
+      }
+    });
+  }, [layers, isPlaying]);
+
   // Seek on load
   const handleLoaded = () => {
     if (videoRef.current && baseLayerClipTime !== undefined) {
@@ -201,9 +234,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     };
   }, [draggingLayer, dragStart, onLayerMove]);
 
+  // Aspect ratio styles
+  const aspectRatioClass = aspectRatio === '9:16' ? 'aspect-[9/16] max-h-[70vh]' : 'aspect-video max-w-4xl';
+
   if (layers.length === 0) {
     return (
-      <div className="relative w-full max-w-4xl aspect-video bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center">
+      <div className={`relative w-full ${aspectRatioClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
         <div className="text-center text-zinc-600">
           <Play className="w-12 h-12 mx-auto mb-2 opacity-50" />
           <p className="text-sm">No media to display</p>
@@ -221,7 +257,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   return (
     <div
       ref={containerRef}
-      className="relative w-full max-w-4xl aspect-video bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10"
+      className={`relative w-full ${aspectRatioClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10`}
     >
       {/* Base video layer (V1) - rendered separately for stability */}
       {foundBaseLayer && (
@@ -248,6 +284,13 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           return (
             <video
               key={layer.id}
+              ref={(el) => {
+                if (el) {
+                  overlayVideoRefs.current.set(layer.id, el);
+                } else {
+                  overlayVideoRefs.current.delete(layer.id);
+                }
+              }}
               src={layer.url}
               className={`absolute inset-0 w-full h-full object-contain cursor-grab active:cursor-grabbing ${
                 isSelected ? 'ring-2 ring-orange-500 ring-offset-2 ring-offset-black' : ''
@@ -256,20 +299,70 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               playsInline
               preload="auto"
               muted
+              onLoadedData={(e) => {
+                // Seek to correct time when loaded
+                const video = e.currentTarget;
+                if (layer.clipTime !== undefined) {
+                  video.currentTime = layer.clipTime;
+                }
+                // Auto-play if timeline is playing
+                if (isPlaying) {
+                  video.play().catch(() => {});
+                }
+              }}
               onMouseDown={(e) => handleLayerMouseDown(e, layer)}
             />
           );
         }
 
         if (layer.type === 'image') {
+          // For overlay images (V2, V3), use explicit sizing instead of fill-then-scale
+          if (isOverlay) {
+            const scale = layer.transform?.scale || 0.2;
+            const xOffset = layer.transform?.x || 0;
+            const yOffset = layer.transform?.y || 0;
+            const baseZIndex = (styles.zIndex as number) || 0;
+
+            return (
+              <div
+                key={layer.id}
+                className="absolute cursor-grab active:cursor-grabbing"
+                style={{
+                  width: `${scale * 100}%`,
+                  bottom: `calc(10% + ${yOffset}px)`,
+                  left: `calc(50% + ${xOffset}px)`,
+                  transform: 'translateX(-50%)',
+                  zIndex: baseZIndex + 100,
+                  opacity: layer.transform?.opacity ?? 1,
+                }}
+                onMouseDown={(e) => handleLayerMouseDown(e, layer)}
+              >
+                <img
+                  src={layer.url}
+                  alt="Layer"
+                  className="w-full h-auto rounded-lg shadow-lg pointer-events-none"
+                  draggable={false}
+                />
+                {/* Selection indicator */}
+                {isSelected && (
+                  <div className="absolute inset-0 ring-2 ring-orange-500 rounded-lg pointer-events-none" />
+                )}
+                {/* Drag handle indicator */}
+                {!isDragging && (
+                  <div className="absolute top-2 right-2 p-1.5 bg-black/60 rounded text-white/70 pointer-events-none">
+                    <Move className="w-3 h-3" />
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          // For V1 images (full background), use the original fill approach
           return (
             <div
               key={layer.id}
-              className={`absolute inset-0 w-full h-full ${
-                isOverlay ? 'cursor-grab active:cursor-grabbing' : ''
-              }`}
-              style={{ ...styles, pointerEvents: isOverlay ? 'auto' : 'none' }}
-              onMouseDown={isOverlay ? (e) => handleLayerMouseDown(e, layer) : undefined}
+              className="absolute inset-0 w-full h-full"
+              style={{ ...styles, pointerEvents: 'none' }}
             >
               <img
                 src={layer.url}
@@ -277,16 +370,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 className="w-full h-full object-contain pointer-events-none"
                 draggable={false}
               />
-              {/* Selection indicator for overlay images */}
-              {isSelected && isOverlay && (
-                <div className="absolute inset-0 ring-2 ring-orange-500 pointer-events-none" />
-              )}
-              {/* Drag handle indicator */}
-              {isOverlay && !isDragging && (
-                <div className="absolute top-2 right-2 p-1.5 bg-black/60 rounded text-white/70 pointer-events-none">
-                  <Move className="w-3 h-3" />
-                </div>
-              )}
             </div>
           );
         }
