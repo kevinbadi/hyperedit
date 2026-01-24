@@ -1,5 +1,5 @@
 import { useRef, useCallback } from 'react';
-import { Film, Image, Music, Upload, Trash2, Plus } from 'lucide-react';
+import { Film, Image, Music, Upload, Trash2, Plus, Sparkles } from 'lucide-react';
 import type { Asset } from '@/react-app/hooks/useProject';
 
 interface AssetLibraryProps {
@@ -213,6 +213,17 @@ function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart }: Asset
       <div className={`absolute top-1 left-1 px-1.5 py-0.5 rounded bg-gradient-to-r ${colorClass} text-[9px] font-medium uppercase`}>
         {asset.type}
       </div>
+
+      {/* AI-generated badge */}
+      {asset.aiGenerated && (
+        <div
+          className="absolute top-1 left-[52px] px-1.5 py-0.5 rounded bg-gradient-to-r from-purple-500 to-pink-500 text-[9px] font-medium flex items-center gap-0.5"
+          title="AI-generated Remotion animation"
+        >
+          <Sparkles className="w-2.5 h-2.5" />
+          AI
+        </div>
+      )}
 
       {/* Duration/info */}
       <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent px-2 py-1">

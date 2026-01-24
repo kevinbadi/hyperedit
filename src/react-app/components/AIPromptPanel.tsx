@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer } from 'lucide-react';
+import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus } from 'lucide-react';
 import type { TimelineClip, Track, Asset } from '@/react-app/hooks/useProject';
 import { MOTION_TEMPLATES, type TemplateId } from '@/remotion/templates';
 import MotionGraphicsPanel from './MotionGraphicsPanel';
@@ -12,6 +12,14 @@ interface TimelineReference {
   details: string;
   trackId?: string;
   timestamp?: number;
+}
+
+// Attached asset for animation creation
+interface AttachedAsset {
+  id: string;
+  filename: string;
+  type: 'image' | 'video';
+  thumbnailUrl?: string | null;
 }
 
 // Time range for scoped edits
@@ -140,7 +148,8 @@ interface AIPromptPanelProps {
   onRemoveDeadAir?: () => Promise<{ duration: number; removedDuration: number }>;
   onChapterCuts?: () => Promise<ChapterCutResult>;
   onAddMotionGraphic?: (config: MotionGraphicConfig) => Promise<void>;
-  onCreateCustomAnimation?: (description: string, startTime?: number, endTime?: number) => Promise<CustomAnimationResult>;
+  onCreateCustomAnimation?: (description: string, startTime?: number, endTime?: number, attachedAssetIds?: string[]) => Promise<CustomAnimationResult>;
+  onUploadAttachment?: (file: File) => Promise<Asset>;
   onAnalyzeForAnimation?: (request: ContextualAnimationRequest) => Promise<{ concept: AnimationConcept }>;
   onRenderFromConcept?: (concept: AnimationConcept) => Promise<CustomAnimationResult>;
   onCreateContextualAnimation?: (request: ContextualAnimationRequest) => Promise<CustomAnimationResult>;
@@ -172,6 +181,7 @@ export default function AIPromptPanel({
   onChapterCuts,
   onAddMotionGraphic,
   onCreateCustomAnimation,
+  onUploadAttachment,
   onAnalyzeForAnimation,
   onRenderFromConcept,
   onCreateContextualAnimation: _onCreateContextualAnimation,
@@ -183,7 +193,7 @@ export default function AIPromptPanel({
   applyStatus,
   hasVideo,
   clips = [],
-  tracks = [],
+  tracks: _tracks = [],
   assets = [],
   currentTime = 0,
   selectedClipId,
@@ -203,6 +213,10 @@ export default function AIPromptPanel({
   const [timeRange, setTimeRange] = useState<TimeRange | null>(null);
   const [timeRangeInputs, setTimeRangeInputs] = useState({ start: '', end: '' });
   const [showMotionGraphicsModal, setShowMotionGraphicsModal] = useState(false);
+  const [attachedAssets, setAttachedAssets] = useState<AttachedAsset[]>([]);
+  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const [isDragOverChat, setIsDragOverChat] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const quickActionsRef = useRef<HTMLDivElement>(null);
   const referencePickerRef = useRef<HTMLDivElement>(null);
   const timeRangePickerRef = useRef<HTMLDivElement>(null);
@@ -335,11 +349,6 @@ export default function AIPromptPanel({
     setTimeRangeInputs({ start: '', end: '' });
   };
 
-  // Get asset for a clip
-  const getAssetForClip = (clip: TimelineClip): Asset | undefined => {
-    return assets.find(a => a.id === clip.assetId);
-  };
-
   // Add a reference
   const addReference = (ref: TimelineReference) => {
     // Don't add duplicates
@@ -353,6 +362,102 @@ export default function AIPromptPanel({
   // Remove a reference
   const removeReference = (index: number) => {
     setSelectedReferences(prev => prev.filter((_, i) => i !== index));
+  };
+
+  // Handle file attachment for animations
+  const handleFileAttachment = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0 || !onUploadAttachment) return;
+
+    setIsUploadingAttachment(true);
+    try {
+      for (const file of Array.from(files)) {
+        // Only allow images and videos
+        if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) {
+          console.warn('Skipping non-image/video file:', file.name);
+          continue;
+        }
+
+        const asset = await onUploadAttachment(file);
+        if (asset && (asset.type === 'image' || asset.type === 'video')) {
+          setAttachedAssets(prev => [...prev, {
+            id: asset.id,
+            filename: asset.filename,
+            type: asset.type as 'image' | 'video',
+            thumbnailUrl: asset.thumbnailUrl,
+          }]);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to upload attachment:', error);
+    } finally {
+      setIsUploadingAttachment(false);
+      // Reset the input so the same file can be selected again
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  // Remove an attached asset
+  const removeAttachment = (index: number) => {
+    setAttachedAssets(prev => prev.filter((_, i) => i !== index));
+  };
+
+  // Clear all attachments (called after successful animation creation)
+  const clearAttachments = () => {
+    setAttachedAssets([]);
+  };
+
+  // Handle drag over for asset drops from library
+  const handleDragOver = (e: React.DragEvent) => {
+    // Check if this is an asset drag from the library
+    if (e.dataTransfer.types.includes('application/x-hyperedit-asset')) {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsDragOverChat(true);
+    }
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only set to false if we're leaving the container (not entering a child)
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDragOverChat(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOverChat(false);
+
+    const assetData = e.dataTransfer.getData('application/x-hyperedit-asset');
+    if (!assetData) return;
+
+    try {
+      const asset = JSON.parse(assetData);
+      // Only accept images and GIFs (which are also type 'image')
+      if (asset.type === 'image') {
+        // Check if already attached
+        if (attachedAssets.some(a => a.id === asset.id)) {
+          console.log('Asset already attached:', asset.filename);
+          return;
+        }
+        setAttachedAssets(prev => [...prev, {
+          id: asset.id,
+          filename: asset.filename,
+          type: asset.type as 'image' | 'video',
+          thumbnailUrl: asset.thumbnailUrl,
+        }]);
+        console.log('Asset attached from drag:', asset.filename);
+      } else {
+        console.log('Only images/GIFs can be dropped here. Got:', asset.type);
+      }
+    } catch (err) {
+      console.error('Failed to parse dropped asset:', err);
+    }
   };
 
   // Build reference context for the prompt
@@ -644,6 +749,10 @@ export default function AIPromptPanel({
     hasTimeRange: boolean;
     timeRangeStart?: number;
     timeRangeEnd?: number;
+    // Info about AI-generated animations on the main timeline
+    hasAiAnimationsOnTimeline: boolean;
+    selectedClipIsAiAnimation: boolean;
+    selectedAiAnimationAssetId?: string;
   }
 
   const determineWorkflow = (ctx: DirectorContext): WorkflowType => {
@@ -652,6 +761,17 @@ export default function AIPromptPanel({
     // ============================================
     // CONTEXT-AWARE DECISIONS
     // ============================================
+
+    // If user has selected an AI animation clip on the main timeline and wants to edit it
+    if (ctx.selectedClipIsAiAnimation && !ctx.isOnEditTab) {
+      const isEditIntent = lower.includes('edit') || lower.includes('change') ||
+                          lower.includes('modify') || lower.includes('update') ||
+                          lower.includes('make it') || lower.includes('adjust') ||
+                          lower.includes('add') || lower.includes('remove');
+      if (isEditIntent) {
+        return 'edit-animation';
+      }
+    }
 
     // If on an edit tab with an animation, most prompts are about editing that animation
     // Unless they explicitly ask for something unrelated (like "add captions to my main video")
@@ -1186,16 +1306,35 @@ export default function AIPromptPanel({
     setIsProcessing(true);
     setProcessingStatus('Generating custom animation with AI...');
 
+    // Capture current attachments before clearing
+    const currentAttachments = [...attachedAssets];
+    const attachedAssetIds = currentAttachments.map(a => a.id);
+
     try {
       const hasTimeRange = startTimeOverride !== undefined;
+      const hasAttachments = currentAttachments.length > 0;
+
+      let statusMessage = `🎬 Creating custom animation...\n\n`;
+      statusMessage += `1. ${hasTimeRange ? 'Using specified time range for context' : 'Analyzing video transcript for context'}\n`;
+      if (hasAttachments) {
+        statusMessage += `2. Including ${currentAttachments.length} attached asset(s): ${currentAttachments.map(a => a.filename).join(', ')}\n`;
+        statusMessage += `3. Generating Remotion component with AI\n4. Rendering animation to video\n5. Adding to timeline`;
+      } else {
+        statusMessage += `2. Generating Remotion component with AI\n3. Rendering animation to video\n4. Adding to timeline`;
+      }
+      statusMessage += `\n\nThis may take a moment...`;
+
       setChatHistory(prev => [...prev, {
         type: 'assistant',
-        text: `🎬 Creating custom animation...\n\n1. ${hasTimeRange ? 'Using specified time range for context' : 'Analyzing video transcript for context'}\n2. Generating Remotion component with AI\n3. Rendering animation to video\n4. Adding to timeline\n\nThis may take a moment...`,
+        text: statusMessage,
         isProcessingGifs: true,
       }]);
 
-      // Pass time range to the animation generator for transcript context
-      const result = await onCreateCustomAnimation(description, startTimeOverride, endTimeOverride);
+      // Pass time range and attached assets to the animation generator
+      const result = await onCreateCustomAnimation(description, startTimeOverride, endTimeOverride, attachedAssetIds.length > 0 ? attachedAssetIds : undefined);
+
+      // Clear attachments after successful creation
+      clearAttachments();
 
       // Update the last message to show completion with edit-in-tab option
       setChatHistory(prev => {
@@ -1204,7 +1343,7 @@ export default function AIPromptPanel({
         if (updated[lastIdx]?.isProcessingGifs) {
           updated[lastIdx] = {
             ...updated[lastIdx],
-            text: `✅ Custom animation created and added to your timeline!\n\nDuration: ${result.duration}s\n\nThe AI-generated animation is now on your V2 overlay track.`,
+            text: `✅ Custom animation created and added to your timeline!\n\nDuration: ${result.duration}s${hasAttachments ? `\nIncluded assets: ${currentAttachments.map(a => a.filename).join(', ')}` : ''}\n\nThe AI-generated animation is now on your V2 overlay track.`,
             isProcessingGifs: false,
             applied: true,
             animationAssetId: result.assetId,
@@ -1526,13 +1665,30 @@ export default function AIPromptPanel({
     // Trust this even if the asset isn't found in local state (handles timing issues)
     const isOnAnimationEditTab = !isManualTab && !!editTabAssetId;
 
-    // Also check the aiGenerated flag if we can find the asset (more reliable confirmation)
+    // Check aiGenerated flag - use editTabV1Context directly (don't look up asset again, it might fail)
+    // This catches both:
+    // 1. Tabs created via "Open in Tab" (animationAsset.aiGenerated)
+    // 2. Manual tabs where user dragged an AI animation to V1 (editTabV1Context.aiGenerated)
     const editTabHasRemotionAnimation = !!(animationAsset && animationAsset.aiGenerated) ||
-                                         !!(editTabV1Context && assets.find(a => a.id === editTabV1Context.assetId)?.aiGenerated);
+                                         !!(editTabV1Context?.aiGenerated);
 
     // For edit detection: trust either the tab metadata (assetId set) OR the aiGenerated flag
     // This ensures we route to edit-animation even if there's a timing issue with assets state
     const editTabHasAnimation = isOnAnimationEditTab || editTabHasRemotionAnimation;
+
+    // Check for AI-generated animations on the main timeline
+    const aiAnimationsOnTimeline = clips
+      .map(clip => {
+        const asset = assets.find(a => a.id === clip.assetId);
+        return asset?.aiGenerated ? { clipId: clip.id, assetId: asset.id, asset } : null;
+      })
+      .filter(Boolean);
+    const hasAiAnimationsOnTimeline = aiAnimationsOnTimeline.length > 0;
+
+    // Check if the currently selected clip is an AI animation
+    const selectedClip = selectedClipId ? clips.find(c => c.id === selectedClipId) : null;
+    const selectedClipAsset = selectedClip ? assets.find(a => a.id === selectedClip.assetId) : null;
+    const selectedClipIsAiAnimation = !!(selectedClipAsset?.aiGenerated);
 
     const directorContext: DirectorContext = {
       prompt: userMessage,
@@ -1543,6 +1699,9 @@ export default function AIPromptPanel({
       hasTimeRange: !!savedTimeRange,
       timeRangeStart: savedTimeRange?.start,
       timeRangeEnd: savedTimeRange?.end,
+      hasAiAnimationsOnTimeline,
+      selectedClipIsAiAnimation,
+      selectedAiAnimationAssetId: selectedClipIsAiAnimation ? selectedClipAsset?.id : undefined,
     };
 
     const workflow = determineWorkflow(directorContext);
@@ -1558,6 +1717,15 @@ export default function AIPromptPanel({
       hasTimeRange: directorContext.hasTimeRange,
       animationAssetFound: !!animationAsset,
       animationAssetAiGenerated: animationAsset?.aiGenerated,
+      // AI animations on main timeline
+      hasAiAnimationsOnTimeline: directorContext.hasAiAnimationsOnTimeline,
+      selectedClipIsAiAnimation: directorContext.selectedClipIsAiAnimation,
+      selectedAiAnimationAssetId: directorContext.selectedAiAnimationAssetId,
+      editTabV1Context: editTabV1Context ? {
+        assetId: editTabV1Context.assetId,
+        filename: editTabV1Context.filename,
+        aiGenerated: editTabV1Context.aiGenerated,
+      } : null,
     });
 
     // ===========================================
@@ -1565,13 +1733,19 @@ export default function AIPromptPanel({
     // ===========================================
 
     // Edit existing animation (Remotion)
-    // Use the V1 clip's asset ID if available (for manual tabs with dragged animations)
-    // Otherwise fall back to editTabAssetId (for tabs created via "Edit in new tab")
-    const animationAssetIdToEdit = editTabV1Context?.assetId || editTabAssetId;
+    // Priority for asset ID:
+    // 1. Selected AI animation on main timeline (selectedAiAnimationAssetId)
+    // 2. V1 clip's asset ID in edit tab (for manual tabs with dragged animations)
+    // 3. editTabAssetId (for tabs created via "Edit in new tab")
+    const animationAssetIdToEdit = directorContext.selectedAiAnimationAssetId ||
+                                   editTabV1Context?.assetId ||
+                                   editTabAssetId;
     if (workflow === 'edit-animation' && animationAssetIdToEdit && onEditAnimation) {
       console.log('[Director] Editing animation with asset ID:', animationAssetIdToEdit);
-      console.log('[Director] editTabAssetId was:', editTabAssetId);
-      console.log('[Director] editTabV1Context?.assetId was:', editTabV1Context?.assetId);
+      console.log('[Director] Source: selectedAiAnimation=%s, editTabV1Context=%s, editTabAssetId=%s',
+        directorContext.selectedAiAnimationAssetId,
+        editTabV1Context?.assetId,
+        editTabAssetId);
       await handleEditAnimationWorkflow(userMessage, animationAssetIdToEdit);
       return;
     }
@@ -1756,7 +1930,22 @@ export default function AIPromptPanel({
   };
 
   return (
-    <div className="h-full bg-zinc-900/80 border-l border-zinc-800/50 flex flex-col backdrop-blur-sm">
+    <div
+      className={`h-full bg-zinc-900/80 border-l border-zinc-800/50 flex flex-col backdrop-blur-sm transition-colors relative ${
+        isDragOverChat ? 'ring-2 ring-inset ring-purple-500/50 bg-purple-500/5' : ''
+      }`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* Drop overlay indicator */}
+      {isDragOverChat && (
+        <div className="absolute inset-0 flex items-center justify-center bg-purple-500/10 z-50 pointer-events-none">
+          <div className="px-4 py-3 bg-purple-500/20 border border-purple-500/40 rounded-xl">
+            <p className="text-sm text-purple-300 font-medium">Drop image to attach</p>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div className="p-4 border-b border-zinc-800/50">
         <div className="flex items-center gap-2 mb-2">
@@ -1922,13 +2111,14 @@ export default function AIPromptPanel({
                       </div>
                     )}
 
-                    {/* Success indicator for GIF/Caption/B-roll/Dead air workflow */}
+                    {/* Success indicator for GIF/Caption/B-roll/Dead air/Animation edit workflow */}
                     {message.applied && !message.command && !message.animationAssetId && (
                       <div className="mt-2 flex items-center gap-2 px-3 py-2 bg-emerald-500/20 rounded-lg text-xs font-medium text-emerald-400">
                         <CheckCircle className="w-3 h-3" />
                         {message.isCaptionWorkflow ? 'Captions added to timeline' :
                          message.isBrollWorkflow ? 'B-roll images added to V3 track' :
                          message.isDeadAirWorkflow ? 'Dead air removed from timeline' :
+                         message.isInPlaceEdit ? 'Edit added to animation' :
                          'GIFs added to timeline'}
                       </div>
                     )}
@@ -2109,8 +2299,8 @@ export default function AIPromptPanel({
           )}
         </div>
 
-        {/* Selected References and Time Range Tags */}
-        {(selectedReferences.length > 0 || timeRange) && (
+        {/* Selected References, Time Range, and Attached Assets Tags */}
+        {(selectedReferences.length > 0 || timeRange || attachedAssets.length > 0) && (
           <div className="flex flex-wrap gap-1.5 mb-2">
             {/* Time Range Tag */}
             {timeRange && (
@@ -2140,6 +2330,23 @@ export default function AIPromptPanel({
                   type="button"
                   onClick={() => removeReference(idx)}
                   className="ml-0.5 hover:text-orange-100"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+            {/* Attached Assets Tags */}
+            {attachedAssets.map((asset, idx) => (
+              <div
+                key={asset.id}
+                className="flex items-center gap-1 px-2 py-1 bg-purple-500/20 text-purple-300 rounded-md text-xs"
+              >
+                {asset.type === 'image' ? <Image className="w-3 h-3" /> : <Film className="w-3 h-3" />}
+                <span className="truncate max-w-[100px]">{asset.filename}</span>
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(idx)}
+                  className="ml-0.5 hover:text-purple-100"
                 >
                   <X className="w-3 h-3" />
                 </button>
@@ -2180,124 +2387,126 @@ export default function AIPromptPanel({
                       ? 'bg-orange-500/20 text-orange-400'
                       : 'hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 disabled:opacity-50'
                   }`}
-                  title="Reference clip or timestamp"
+                  title="Add asset from library"
                 >
                   <Plus className="w-4 h-4" />
                 </button>
 
-                {/* Reference Picker Popover */}
+                {/* Reference Picker Popover - Assets Only */}
                 {showReferencePicker && (
-                  <div className="absolute bottom-full left-0 mb-2 w-64 p-2 bg-zinc-800 border border-zinc-700 rounded-xl shadow-xl z-20 animate-in fade-in slide-in-from-bottom-2 duration-200">
-                    <div className="text-xs font-medium text-zinc-400 px-2 py-1">Reference Element</div>
+                  <div className="absolute bottom-full left-0 mb-2 w-72 p-2 bg-zinc-800 border border-zinc-700 rounded-xl shadow-xl z-20 animate-in fade-in slide-in-from-bottom-2 duration-200">
+                    <div className="text-xs font-medium text-zinc-400 px-2 py-1 mb-1">Select Asset</div>
 
-                    {/* Current Timestamp */}
-                    <button
-                      type="button"
-                      onClick={() => addReference({
-                        type: 'timestamp',
-                        label: `@${formatTimeShort(currentTime)}`,
-                        details: formatTimeShort(currentTime),
-                        timestamp: currentTime,
-                      })}
-                      className="w-full flex items-center gap-2 px-2 py-2 hover:bg-zinc-700 rounded-lg text-left transition-colors"
-                    >
-                      <MapPin className="w-4 h-4 text-orange-400" />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs text-zinc-200">Current Playhead</div>
-                        <div className="text-[10px] text-zinc-500">{formatTimeShort(currentTime)}</div>
-                      </div>
-                    </button>
-
-                    {/* Selected Clip */}
-                    {selectedClipId && (() => {
-                      const selectedClip = clips.find(c => c.id === selectedClipId);
-                      if (!selectedClip) return null;
-                      const asset = getAssetForClip(selectedClip);
-                      return (
-                        <button
-                          type="button"
-                          onClick={() => addReference({
-                            type: 'clip',
-                            id: selectedClip.id,
-                            label: asset?.filename || 'Selected Clip',
-                            details: `${formatTimeShort(selectedClip.start)} - ${formatTimeShort(selectedClip.start + selectedClip.duration)}`,
-                            trackId: selectedClip.trackId,
-                          })}
-                          className="w-full flex items-center gap-2 px-2 py-2 hover:bg-zinc-700 rounded-lg text-left transition-colors border-l-2 border-orange-500"
-                        >
-                          <Film className="w-4 h-4 text-blue-400" />
-                          <div className="flex-1 min-w-0">
-                            <div className="text-xs text-zinc-200 truncate">{asset?.filename || 'Selected Clip'}</div>
-                            <div className="text-[10px] text-zinc-500">{selectedClip.trackId} · {formatTimeShort(selectedClip.start)}</div>
-                          </div>
-                        </button>
-                      );
-                    })()}
-
-                    {/* Divider */}
-                    {clips.length > 0 && (
-                      <div className="border-t border-zinc-700 my-1.5" />
-                    )}
-
-                    {/* Clips list */}
-                    <div className="max-h-32 overflow-y-auto">
-                      {clips.slice(0, 8).map(clip => {
-                        const asset = getAssetForClip(clip);
-                        const isSelected = clip.id === selectedClipId;
-                        if (isSelected) return null;
-                        return (
-                          <button
-                            key={clip.id}
-                            type="button"
-                            onClick={() => addReference({
-                              type: 'clip',
-                              id: clip.id,
-                              label: asset?.filename || 'Clip',
-                              details: `${formatTimeShort(clip.start)} - ${formatTimeShort(clip.start + clip.duration)}`,
-                              trackId: clip.trackId,
-                            })}
-                            className="w-full flex items-center gap-2 px-2 py-1.5 hover:bg-zinc-700 rounded-lg text-left transition-colors"
-                          >
-                            {asset?.type === 'audio' ? (
-                              <Music className="w-3 h-3 text-emerald-400 flex-shrink-0" />
-                            ) : (
-                              <Film className="w-3 h-3 text-blue-400 flex-shrink-0" />
-                            )}
-                            <div className="flex-1 min-w-0">
-                              <div className="text-[11px] text-zinc-300 truncate">{asset?.filename || 'Clip'}</div>
-                              <div className="text-[10px] text-zinc-500">{clip.trackId} · {formatTimeShort(clip.start)}</div>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    {/* Tracks */}
-                    {tracks.length > 0 && (
-                      <>
-                        <div className="border-t border-zinc-700 my-1.5" />
-                        <div className="text-xs font-medium text-zinc-400 px-2 py-1">Tracks</div>
-                        <div className="flex flex-wrap gap-1 px-2">
-                          {tracks.map(track => (
-                            <button
-                              key={track.id}
-                              type="button"
-                              onClick={() => addReference({
-                                type: 'track',
-                                id: track.id,
-                                label: track.name,
-                                details: track.type,
-                              })}
-                              className="px-2 py-1 bg-zinc-700/50 hover:bg-zinc-700 rounded text-[10px] text-zinc-300 transition-colors"
-                            >
-                              {track.name}
-                            </button>
-                          ))}
+                    {/* Assets list */}
+                    <div className="max-h-64 overflow-y-auto space-y-1">
+                      {assets.length === 0 ? (
+                        <div className="px-2 py-4 text-center text-xs text-zinc-500">
+                          No assets in library
                         </div>
-                      </>
-                    )}
+                      ) : (
+                        assets.map(asset => {
+                          // Create a friendly display name
+                          const displayName = asset.aiGenerated
+                            ? asset.filename.replace(/^picasso-/, '').replace(/\.[^/.]+$/, '').replace(/-/g, ' ')
+                            : asset.filename.replace(/\.[^/.]+$/, '');
+                          const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}/.test(displayName);
+                          const friendlyName = isUUID
+                            ? `${asset.aiGenerated ? 'AI ' : ''}${asset.type.charAt(0).toUpperCase() + asset.type.slice(1)}`
+                            : displayName.length > 25 ? displayName.substring(0, 25) + '...' : displayName;
+
+                          return (
+                            <button
+                              key={asset.id}
+                              type="button"
+                              onClick={() => {
+                                addReference({
+                                  type: 'clip',
+                                  id: asset.id,
+                                  label: asset.filename,
+                                  details: asset.type,
+                                });
+                                setShowReferencePicker(false);
+                              }}
+                              className="w-full flex items-center gap-3 px-2 py-2 hover:bg-zinc-700 rounded-lg text-left transition-colors group"
+                            >
+                              {/* Thumbnail or icon placeholder */}
+                              <div className="w-12 h-12 rounded-lg overflow-hidden bg-zinc-700 flex-shrink-0 flex items-center justify-center">
+                                {asset.thumbnailUrl ? (
+                                  <img
+                                    src={`http://localhost:3333${asset.thumbnailUrl}`}
+                                    alt=""
+                                    className="w-full h-full object-cover"
+                                    onError={(e) => {
+                                      e.currentTarget.style.display = 'none';
+                                      e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                                    }}
+                                  />
+                                ) : null}
+                                <div className={asset.thumbnailUrl ? 'hidden' : ''}>
+                                  {asset.type === 'audio' ? (
+                                    <Music className="w-5 h-5 text-emerald-400" />
+                                  ) : asset.type === 'image' ? (
+                                    <Image className="w-5 h-5 text-purple-400" />
+                                  ) : (
+                                    <Film className="w-5 h-5 text-blue-400" />
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Text info */}
+                              <div className="flex-1 min-w-0">
+                                <div className="text-sm text-zinc-200 truncate font-medium">{friendlyName}</div>
+                                <div className="flex items-center gap-1.5 mt-0.5">
+                                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                                    asset.type === 'video' ? 'bg-blue-500/20 text-blue-300' :
+                                    asset.type === 'image' ? 'bg-purple-500/20 text-purple-300' :
+                                    'bg-emerald-500/20 text-emerald-300'
+                                  }`}>
+                                    {asset.type}
+                                  </span>
+                                  {asset.aiGenerated && (
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-300">
+                                      AI
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
                   </div>
                 )}
+              </div>
+
+              {/* File Attachment Button for Animations */}
+              <div className="relative">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*,video/*"
+                  multiple
+                  onChange={handleFileAttachment}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={!hasVideo || isProcessing || isUploadingAttachment || !onUploadAttachment}
+                  className={`p-1.5 rounded-md transition-all ${
+                    attachedAssets.length > 0
+                      ? 'bg-purple-500/20 text-purple-400'
+                      : 'hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 disabled:opacity-50'
+                  }`}
+                  title={attachedAssets.length > 0 ? `${attachedAssets.length} file(s) attached` : 'Attach images/videos for animation'}
+                >
+                  {isUploadingAttachment ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <ImagePlus className="w-4 h-4" />
+                  )}
+                </button>
               </div>
 
               {/* Time Range Picker Button */}

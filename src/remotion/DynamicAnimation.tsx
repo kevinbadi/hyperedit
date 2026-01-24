@@ -1,9 +1,9 @@
 import React, { useMemo } from 'react';
-import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring, Sequence, Easing } from 'remotion';
+import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring, Sequence, Img, Video, staticFile } from 'remotion';
 
 export interface Scene {
   id: string;
-  type: 'title' | 'steps' | 'features' | 'stats' | 'text' | 'transition';
+  type: 'title' | 'steps' | 'features' | 'stats' | 'text' | 'transition' | 'media';
   duration: number;
   content: {
     title?: string;
@@ -19,13 +19,26 @@ export interface Scene {
     }>;
     color?: string;
     backgroundColor?: string;
+    // For media scenes
+    mediaAssetId?: string;
+    mediaPath?: string;
+    mediaType?: 'image' | 'video';
+    mediaStyle?: 'fullscreen' | 'framed' | 'pip';
   };
+}
+
+interface AttachedAsset {
+  id: string;
+  path: string;
+  type: 'image' | 'video';
+  filename: string;
 }
 
 interface DynamicAnimationProps {
   scenes: Scene[];
   title?: string;
   backgroundColor?: string;
+  attachedAssets?: AttachedAsset[];
 }
 
 // Particle component for explosion effects
@@ -688,6 +701,184 @@ const TransitionScene: React.FC<{ content: Scene['content'] }> = ({ content }) =
   );
 };
 
+// Media Scene - displays images or videos with animations
+const MediaScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
+  const frame = useCurrentFrame();
+  const { fps, durationInFrames, width, height } = useVideoConfig();
+  const accentColor = content.color || '#f97316';
+  const mediaStyle = content.mediaStyle || 'framed';
+
+  // Entry animation
+  const entrySpring = spring({
+    frame,
+    fps,
+    config: { damping: 12, stiffness: 100 },
+  });
+
+  const scale = interpolate(entrySpring, [0, 1], [0.8, 1]);
+  const opacity = interpolate(entrySpring, [0, 0.5], [0, 1], { extrapolateRight: 'clamp' });
+
+  // Exit animation
+  const exitOpacity = interpolate(
+    frame,
+    [durationInFrames - 15, durationInFrames],
+    [1, 0],
+    { extrapolateRight: 'clamp' }
+  );
+
+  // Determine media dimensions based on style
+  const getMediaStyles = () => {
+    switch (mediaStyle) {
+      case 'fullscreen':
+        return {
+          width: '100%',
+          height: '100%',
+          objectFit: 'cover' as const,
+        };
+      case 'pip':
+        return {
+          width: '40%',
+          height: 'auto',
+          position: 'absolute' as const,
+          bottom: 80,
+          right: 80,
+          borderRadius: 16,
+          boxShadow: `0 20px 60px rgba(0,0,0,0.5), 0 0 40px ${accentColor}33`,
+        };
+      case 'framed':
+      default:
+        return {
+          maxWidth: '80%',
+          maxHeight: '70%',
+          objectFit: 'contain' as const,
+          borderRadius: 20,
+          boxShadow: `0 20px 80px rgba(0,0,0,0.6), 0 0 60px ${accentColor}44`,
+        };
+    }
+  };
+
+  const mediaStyles = getMediaStyles();
+
+  // If no media path provided, show a placeholder
+  if (!content.mediaPath) {
+    return (
+      <AbsoluteFill
+        style={{
+          justifyContent: 'center',
+          alignItems: 'center',
+          backgroundColor: content.backgroundColor || 'transparent',
+        }}
+      >
+        <GradientBackground color1="#0a0a0a" color2={accentColor + '33'} color3="#0a0a0a" />
+        <div
+          style={{
+            fontSize: 32,
+            color: '#a1a1aa',
+            fontFamily: 'Inter, system-ui, sans-serif',
+          }}
+        >
+          Media not found
+        </div>
+      </AbsoluteFill>
+    );
+  }
+
+  // Debug: Log the media path being processed
+  console.log('[MediaScene] Processing media:', {
+    mediaPath: content.mediaPath,
+    mediaAssetId: content.mediaAssetId,
+    mediaType: content.mediaType,
+    mediaStyle: content.mediaStyle,
+  });
+
+  // Use the path directly - server now provides HTTP URLs
+  const mediaUrl = content.mediaPath;
+
+  return (
+    <AbsoluteFill
+      style={{
+        justifyContent: 'center',
+        alignItems: 'center',
+        backgroundColor: content.backgroundColor || 'transparent',
+        overflow: 'hidden',
+      }}
+    >
+      <GradientBackground color1="#0a0a0a" color2={accentColor + '22'} color3="#0a0a0a" />
+
+      {/* Decorative orbs behind media */}
+      <GlowingOrb x={15} y={25} size={180} color={accentColor} delay={0} />
+      <GlowingOrb x={85} y={75} size={150} color="#3b82f6" delay={5} />
+
+      {/* Title overlay if present */}
+      {content.title && mediaStyle !== 'fullscreen' && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 60,
+            zIndex: 20,
+            opacity: opacity * exitOpacity,
+          }}
+        >
+          <AnimatedText
+            text={content.title}
+            fontSize={48}
+            color="#ffffff"
+            style="bounce"
+          />
+        </div>
+      )}
+
+      {/* Media container */}
+      <div
+        style={{
+          transform: `scale(${scale})`,
+          opacity: opacity * exitOpacity,
+          zIndex: 10,
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+        }}
+      >
+        {content.mediaType === 'video' ? (
+          <Video
+            src={mediaUrl}
+            style={mediaStyles}
+          />
+        ) : (
+          <Img
+            src={mediaUrl}
+            style={mediaStyles}
+          />
+        )}
+      </div>
+
+      {/* Subtitle below media */}
+      {content.subtitle && mediaStyle !== 'fullscreen' && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 60,
+            zIndex: 20,
+            opacity: opacity * exitOpacity,
+          }}
+        >
+          <AnimatedText
+            text={content.subtitle}
+            fontSize={28}
+            color="#a1a1aa"
+            style="wave"
+            fontWeight={400}
+            delay={10}
+          />
+        </div>
+      )}
+
+      {/* Entry explosion effect */}
+      {frame < 25 && <ExplosionEffect color={accentColor} particleCount={12} delay={3} />}
+    </AbsoluteFill>
+  );
+};
+
 // Scene renderer
 const SceneRenderer: React.FC<{ scene: Scene }> = ({ scene }) => {
   switch (scene.type) {
@@ -702,6 +893,8 @@ const SceneRenderer: React.FC<{ scene: Scene }> = ({ scene }) => {
       return <TextScene content={scene.content} />;
     case 'transition':
       return <TransitionScene content={scene.content} />;
+    case 'media':
+      return <MediaScene content={scene.content} />;
     default:
       return <TitleScene content={scene.content} />;
   }

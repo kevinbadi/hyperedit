@@ -5,12 +5,13 @@ import AssetLibrary from '@/react-app/components/AssetLibrary';
 import ClipPropertiesPanel from '@/react-app/components/ClipPropertiesPanel';
 import CaptionPropertiesPanel from '@/react-app/components/CaptionPropertiesPanel';
 import AIPromptPanel from '@/react-app/components/AIPromptPanel';
+import PicassoPanel from '@/react-app/components/PicassoPanel';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
 import TimelineTabs from '@/react-app/components/TimelineTabs';
 import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks/useProject';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
-import { Sparkles, ListOrdered, Copy, Check, X, Download, Play } from 'lucide-react';
+import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette } from 'lucide-react';
 import type { TemplateId } from '@/remotion/templates';
 
 interface ChapterData {
@@ -30,6 +31,7 @@ export default function Home() {
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
   const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16'>('16:9');
   const [autoSnap, setAutoSnap] = useState(true); // Ripple delete mode - shift clips when deleting
+  const [activeAgent, setActiveAgent] = useState<'director' | 'picasso'>('director');
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
@@ -69,6 +71,8 @@ export default function Home() {
     closeTimelineTab,
     updateTabClips,
     updateTabAsset,
+    // Settings
+    setSettings,
   } = useProject();
 
   // Compute the active clips based on which tab is selected
@@ -434,8 +438,17 @@ export default function Home() {
 
   // Handle toggling aspect ratio
   const handleToggleAspectRatio = useCallback(() => {
-    setAspectRatio(prev => prev === '16:9' ? '9:16' : '16:9');
-  }, []);
+    setAspectRatio(prev => {
+      const newRatio = prev === '16:9' ? '9:16' : '16:9';
+      // Update project settings with new dimensions
+      if (newRatio === '9:16') {
+        setSettings(s => ({ ...s, width: 1080, height: 1920 }));
+      } else {
+        setSettings(s => ({ ...s, width: 1920, height: 1080 }));
+      }
+      return newRatio;
+    });
+  }, [setSettings]);
 
   // Handle selecting clip
   const handleSelectClip = useCallback((clipId: string | null) => {
@@ -1037,7 +1050,7 @@ export default function Home() {
   }, [session, currentTime, addClip, saveProject, refreshAssets, switchTimelineTab]);
 
   // Handle custom AI-generated animation creation
-  const handleCreateCustomAnimation = useCallback(async (description: string, startTime?: number, endTime?: number) => {
+  const handleCreateCustomAnimation = useCallback(async (description: string, startTime?: number, endTime?: number, attachedAssetIds?: string[]) => {
     if (!session?.sessionId) {
       throw new Error('Please upload a video first to start a session');
     }
@@ -1062,7 +1075,7 @@ export default function Home() {
         }
       }
 
-      console.log(`[Animation] Creating with video context: ${videoAssetId || 'none'}, time range: ${startTime !== undefined ? `${startTime}s` : 'auto'}${endTime !== undefined ? ` - ${endTime}s` : ''}`);
+      console.log(`[Animation] Creating with video context: ${videoAssetId || 'none'}, time range: ${startTime !== undefined ? `${startTime}s` : 'auto'}${endTime !== undefined ? ` - ${endTime}s` : ''}${attachedAssetIds?.length ? `, attached assets: ${attachedAssetIds.length}` : ''}`);
 
       // Call the server to generate AI animation with video context
       const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-animation`, {
@@ -1073,6 +1086,7 @@ export default function Home() {
           videoAssetId, // Pass video for transcript context
           startTime,    // Optional: specific time range
           endTime,      // Optional: specific time range
+          attachedAssetIds, // Optional: images/videos to include in animation
           fps: 30,
           width: 1920,
           height: 1080,
@@ -1679,7 +1693,7 @@ export default function Home() {
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip
-              <div className={`relative w-full ${aspectRatio === '9:16' ? 'aspect-[9/16] max-h-[70vh]' : 'aspect-video max-w-4xl'} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
+              <div className={`relative ${aspectRatio === '9:16' ? 'h-[65vh] w-auto aspect-[9/16]' : 'w-full max-w-4xl aspect-video'} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
                 <div className="text-center text-zinc-600">
                   <div className="text-sm">No clip at playhead</div>
                   <div className="text-xs mt-1">Move playhead over a clip to preview</div>
@@ -1730,7 +1744,7 @@ export default function Home() {
           </ResizableVerticalPanel>
         </div>
 
-        {/* Right Panel - AI Chat */}
+        {/* Right Panel - AI Agents */}
         <ResizablePanel
           defaultWidth={320}
           minWidth={280}
@@ -1738,36 +1752,74 @@ export default function Home() {
           side="right"
         >
           <div className="h-full flex flex-col bg-zinc-900/80 backdrop-blur-sm">
-            {/* AI Chat Panel */}
-            <div className="flex-1 overflow-hidden">
-              <AIPromptPanel
-                onApplyEdit={handleApplyEdit}
-                onExtractKeywordsAndAddGifs={handleExtractKeywordsAndAddGifs}
-                onTranscribeAndAddCaptions={handleTranscribeAndAddCaptions}
-                onGenerateBroll={handleGenerateBroll}
-                onRemoveDeadAir={handleRemoveDeadAir}
-                onChapterCuts={handleChapterCuts}
-                onAddMotionGraphic={handleAddMotionGraphicFromPrompt}
-                onCreateCustomAnimation={handleCreateCustomAnimation}
-                onAnalyzeForAnimation={handleAnalyzeForAnimation}
-                onRenderFromConcept={handleRenderFromConcept}
-                onGenerateTranscriptAnimation={handleGenerateTranscriptAnimation}
-                onCreateContextualAnimation={handleCreateContextualAnimation}
-                onOpenAnimationInTab={handleOpenAnimationInTab}
-                onEditAnimation={handleEditAnimation}
-                isApplying={isProcessing}
-                applyProgress={0}
-                applyStatus={currentStatus}
-                hasVideo={assets.some(a => a.type === 'video')}
-                clips={clips}
-                tracks={tracks}
-                assets={assets}
-                currentTime={currentTime}
-                selectedClipId={selectedClipId}
-                activeTabId={activeTabId}
-                editTabAssetId={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.assetId : undefined}
-                editTabClips={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.clips : undefined}
-              />
+            {/* Agent Tabs */}
+            <div className="flex border-b border-zinc-800/50">
+              <button
+                onClick={() => setActiveAgent('director')}
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                  activeAgent === 'director'
+                    ? 'text-purple-400 border-b-2 border-purple-400 bg-zinc-800/30'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
+                }`}
+              >
+                <Sparkles className="w-4 h-4" />
+                Director
+              </button>
+              <button
+                onClick={() => setActiveAgent('picasso')}
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                  activeAgent === 'picasso'
+                    ? 'text-pink-400 border-b-2 border-pink-400 bg-zinc-800/30'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
+                }`}
+              >
+                <Palette className="w-4 h-4" />
+                Picasso
+              </button>
+            </div>
+
+            {/* AI Chat Panels - both mounted to preserve state, hidden via CSS */}
+            <div className="flex-1 overflow-hidden relative">
+              <div className={`absolute inset-0 ${activeAgent === 'director' ? '' : 'hidden'}`}>
+                <AIPromptPanel
+                  onApplyEdit={handleApplyEdit}
+                  onExtractKeywordsAndAddGifs={handleExtractKeywordsAndAddGifs}
+                  onTranscribeAndAddCaptions={handleTranscribeAndAddCaptions}
+                  onGenerateBroll={handleGenerateBroll}
+                  onRemoveDeadAir={handleRemoveDeadAir}
+                  onChapterCuts={handleChapterCuts}
+                  onAddMotionGraphic={handleAddMotionGraphicFromPrompt}
+                  onCreateCustomAnimation={handleCreateCustomAnimation}
+                  onUploadAttachment={uploadAsset}
+                  onAnalyzeForAnimation={handleAnalyzeForAnimation}
+                  onRenderFromConcept={handleRenderFromConcept}
+                  onGenerateTranscriptAnimation={handleGenerateTranscriptAnimation}
+                  onCreateContextualAnimation={handleCreateContextualAnimation}
+                  onOpenAnimationInTab={handleOpenAnimationInTab}
+                  onEditAnimation={handleEditAnimation}
+                  isApplying={isProcessing}
+                  applyProgress={0}
+                  applyStatus={currentStatus}
+                  hasVideo={assets.some(a => a.type === 'video')}
+                  clips={clips}
+                  tracks={tracks}
+                  assets={assets}
+                  currentTime={currentTime}
+                  selectedClipId={selectedClipId}
+                  activeTabId={activeTabId}
+                  editTabAssetId={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.assetId : undefined}
+                  editTabClips={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.clips : undefined}
+                />
+              </div>
+              <div className={`absolute inset-0 ${activeAgent === 'picasso' ? '' : 'hidden'}`}>
+                <PicassoPanel
+                  sessionId={session?.sessionId ?? null}
+                  onImageGenerated={(assetId) => {
+                    console.log('Image generated:', assetId);
+                  }}
+                  onRefreshAssets={refreshAssets}
+                />
+              </div>
             </div>
           </div>
         </ResizablePanel>

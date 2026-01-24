@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Film, Image, Music, X, Type } from 'lucide-react';
+import { Film, Image, Music, X, Type, Sparkles } from 'lucide-react';
 import type { TimelineClip as TimelineClipType, Asset } from '@/react-app/hooks/useProject';
 
 interface TimelineClipProps {
@@ -224,6 +224,17 @@ export default function TimelineClip({
         <span className="text-xs font-medium truncate">
           {isCaption ? (captionPreview || 'Caption') : (asset?.filename || 'Unknown')}
         </span>
+
+        {/* AI-generated indicator */}
+        {asset?.aiGenerated && (
+          <div
+            className="flex-shrink-0 flex items-center gap-0.5 px-1 py-0.5 bg-purple-500/40 rounded text-[8px] font-bold"
+            title="AI-generated Remotion animation"
+          >
+            <Sparkles className="w-2.5 h-2.5" />
+            AI
+          </div>
+        )}
       </div>
 
       {/* Right resize handle */}

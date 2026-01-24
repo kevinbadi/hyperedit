@@ -279,12 +279,12 @@ export default function Timeline({
             <button
               onClick={onToggleAspectRatio}
               className="p-1.5 bg-zinc-700 hover:bg-zinc-600 rounded transition-colors"
-              title={`Switch to ${aspectRatio === '16:9' ? '9:16 (vertical)' : '16:9 (horizontal)'}`}
+              title={`Currently ${aspectRatio === '16:9' ? '16:9 (horizontal)' : '9:16 (vertical)'} - click to switch`}
             >
               {aspectRatio === '16:9' ? (
-                <RectangleVertical className="w-3.5 h-3.5" />
-              ) : (
                 <RectangleHorizontal className="w-3.5 h-3.5" />
+              ) : (
+                <RectangleVertical className="w-3.5 h-3.5" />
               )}
             </button>
             <div className="w-px h-4 bg-zinc-600" />

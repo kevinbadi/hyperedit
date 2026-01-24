@@ -84,6 +84,19 @@ function restoreSessionsFromDisk() {
 
     // Restore assets from disk
     const assets = new Map();
+
+    // Try to load saved asset metadata first
+    const assetsMetaPath = join(sessionDir, 'assets-meta.json');
+    let savedAssetsMeta = {};
+    if (existsSync(assetsMetaPath)) {
+      try {
+        savedAssetsMeta = JSON.parse(readFileSync(assetsMetaPath, 'utf-8'));
+        console.log(`[Session] Found saved metadata for ${Object.keys(savedAssetsMeta).length} assets`);
+      } catch (e) {
+        console.log(`[Session] Could not read assets-meta.json for ${sessionId}`);
+      }
+    }
+
     const assetFiles = readdirSync(assetsDir, { withFileTypes: true })
       .filter(dirent => dirent.isFile() && !dirent.name.includes('_thumb'));
 
@@ -104,16 +117,31 @@ function restoreSessionsFromDisk() {
         const stats = statSync(assetPath);
         const thumbPath = join(assetsDir, `${assetId}_thumb.jpg`);
 
+        // Merge with saved metadata if available
+        const savedMeta = savedAssetsMeta[assetId] || {};
+
         assets.set(assetId, {
           id: assetId,
-          type,
-          filename: assetFile.name,
+          type: savedMeta.type || type,
+          filename: savedMeta.filename || assetFile.name,
           path: assetPath,
           thumbPath: existsSync(thumbPath) ? thumbPath : null,
           size: stats.size,
-          createdAt: stats.mtimeMs,
-          // Duration will be fetched on demand for videos
+          createdAt: savedMeta.createdAt || stats.mtimeMs,
+          // Restore AI-generated metadata
+          aiGenerated: savedMeta.aiGenerated || false,
+          description: savedMeta.description,
+          sceneCount: savedMeta.sceneCount,
+          sceneDataPath: savedMeta.sceneDataPath,
+          editCount: savedMeta.editCount || 0,
+          duration: savedMeta.duration,
+          width: savedMeta.width,
+          height: savedMeta.height,
         });
+
+        if (savedMeta.aiGenerated) {
+          console.log(`[Session] Restored AI-generated asset: ${assetFile.name}`);
+        }
       } catch (e) {
         console.log(`[Session] Could not stat asset ${assetFile.name}`);
       }
@@ -3399,7 +3427,7 @@ async function handleGenerateAnimation(req, res, sessionId) {
 
   try {
     const body = await parseBody(req);
-    const { description, videoAssetId, startTime, endTime, fps = 30, width = 1920, height = 1080 } = body;
+    const { description, videoAssetId, startTime, endTime, attachedAssetIds, fps = 30, width = 1920, height = 1080 } = body;
 
     if (!description) {
       res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -3415,6 +3443,9 @@ async function handleGenerateAnimation(req, res, sessionId) {
 
     console.log(`\n[${jobId}] === GENERATE AI ANIMATION ===`);
     console.log(`[${jobId}] Description: ${description}`);
+    if (attachedAssetIds?.length) {
+      console.log(`[${jobId}] Attached assets: ${attachedAssetIds.length}`);
+    }
 
     // Step 0: Get video transcript context if a video is provided
     let transcriptContext = '';
@@ -3512,6 +3543,60 @@ IMPORTANT: The animation content should be relevant to and inspired by this vide
       }
     }
 
+    // Build context for attached assets (images/videos to include in animation)
+    let attachedAssetsContext = '';
+    const attachedAssetPaths = [];
+    if (attachedAssetIds?.length) {
+      const attachedAssetInfo = [];
+      for (const attachedId of attachedAssetIds) {
+        const attachedAsset = session.assets.get(attachedId);
+        if (attachedAsset) {
+          // Build HTTP URL for the asset (served by FFmpeg server)
+          const assetUrl = `http://localhost:${PORT}/session/${sessionId}/assets/${attachedAsset.id}/stream`;
+          attachedAssetInfo.push({
+            id: attachedAsset.id,
+            filename: attachedAsset.filename,
+            type: attachedAsset.type,
+            url: assetUrl,
+          });
+          attachedAssetPaths.push({
+            id: attachedAsset.id,
+            path: attachedAsset.path,  // Keep file path for server-side operations
+            url: assetUrl,              // HTTP URL for Remotion rendering
+            type: attachedAsset.type,
+            filename: attachedAsset.filename,
+          });
+        }
+      }
+      if (attachedAssetInfo.length > 0) {
+        attachedAssetsContext = `
+
+ATTACHED MEDIA ASSETS (MUST be included in the animation):
+${attachedAssetInfo.map((a, i) => `Asset ${i + 1}:
+  - id: "${a.id}"
+  - type: "${a.type}"
+  - filename: "${a.filename}"`).join('\n')}
+
+CRITICAL REQUIREMENTS:
+1. You MUST create at least one "media" type scene for each attached asset above
+2. In each media scene, set "mediaAssetId" to the EXACT id value shown above (copy/paste it exactly)
+3. Use "mediaStyle": "framed" for a nicely presented image, or "fullscreen" for dramatic impact
+4. Example media scene:
+   {
+     "id": "show-image",
+     "type": "media",
+     "duration": 90,
+     "content": {
+       "title": "Optional title over the image",
+       "mediaAssetId": "${attachedAssetInfo[0].id}",
+       "mediaStyle": "framed",
+       "color": "#f97316"
+     }
+   }`;
+        console.log(`[${jobId}] Including ${attachedAssetInfo.length} attached assets in animation`);
+      }
+    }
+
     // Step 1: Use Gemini to generate scene data
     console.log(`[${jobId}] Generating scenes with Gemini...`);
 
@@ -3520,13 +3605,13 @@ IMPORTANT: The animation content should be relevant to and inspired by this vide
     const prompt = `You are a motion graphics designer. Create a JSON scene structure for an animated video based on this description:
 
 "${description}"
-${transcriptContext}
+${transcriptContext}${attachedAssetsContext}
 Return ONLY valid JSON (no markdown, no code blocks) with this structure:
 {
   "scenes": [
     {
       "id": "unique-id",
-      "type": "title" | "steps" | "features" | "stats" | "text" | "transition",
+      "type": "title" | "steps" | "features" | "stats" | "text" | "transition" | "media",
       "duration": <number of frames at 30fps, typically 60-150>,
       "content": {
         "title": "optional title text",
@@ -3534,12 +3619,15 @@ Return ONLY valid JSON (no markdown, no code blocks) with this structure:
         "items": [{"icon": "emoji or number", "label": "text", "description": "optional"}],
         "stats": [{"value": "10K+", "label": "Users"}],
         "color": "#hex color for accent",
-        "backgroundColor": "#hex for bg or null for transparent"
+        "backgroundColor": "#hex for bg or null for transparent",
+        "mediaAssetId": "id of attached image/video to display (for media type scenes)",
+        "mediaStyle": "fullscreen" | "framed" | "pip" (picture-in-picture)
       }
     }
   ],
   "backgroundColor": "#0a0a0a",
-  "totalDuration": <sum of all scene durations>
+  "totalDuration": <sum of all scene durations>,
+  "attachedAssets": [{"id": "asset-id", "path": "will be filled by server"}]
 }
 
 Scene types:
@@ -3549,12 +3637,14 @@ Scene types:
 - "stats": Animated statistics/numbers
 - "text": Simple text message
 - "transition": Brief transition between scenes
+- "media": Display an attached image/video (use mediaAssetId to reference)
 
 Guidelines:
 - Keep it concise: 3-6 scenes max
 - Total duration: 5-15 seconds (150-450 frames)
 - Use vibrant colors: #f97316 (orange), #3b82f6 (blue), #22c55e (green), #8b5cf6 (purple)
-- Make it visually engaging with good pacing`;
+- Make it visually engaging with good pacing
+${attachedAssetIds?.length ? '- IMPORTANT: Include media scenes to showcase the attached images/videos' : ''}`;
 
     const result = await ai.models.generateContent({
       model: 'gemini-2.0-flash',
@@ -3580,7 +3670,77 @@ Guidelines:
     const totalDuration = sceneData.totalDuration || sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
     const durationInSeconds = totalDuration / fps;
 
+    // Inject actual asset file paths for attached media (use absolute file paths for Remotion CLI)
+    if (attachedAssetPaths.length > 0) {
+      sceneData.attachedAssets = attachedAssetPaths;
+      console.log(`[${jobId}] Available attached assets:`, attachedAssetPaths.map(a => ({ id: a.id, filename: a.filename, type: a.type })));
+
+      // Also update any media scenes with the correct file paths
+      let mediaSceneCount = 0;
+      for (const scene of sceneData.scenes) {
+        console.log(`[${jobId}] Checking scene: type=${scene.type}, hasMediaAssetId=${!!scene.content?.mediaAssetId}`);
+
+        if (scene.type === 'media' && scene.content?.mediaAssetId) {
+          const matchedAsset = attachedAssetPaths.find(a => a.id === scene.content.mediaAssetId);
+          if (matchedAsset) {
+            // Use HTTP URL for Remotion CLI rendering - more reliable than file:// paths
+            scene.content.mediaPath = matchedAsset.url;
+            scene.content.mediaType = matchedAsset.type;
+            mediaSceneCount++;
+            console.log(`[${jobId}] ✓ Linked media asset to scene: ${matchedAsset.filename} -> ${matchedAsset.url}`);
+          } else {
+            console.log(`[${jobId}] ✗ No matching asset found for mediaAssetId: ${scene.content.mediaAssetId}`);
+            console.log(`[${jobId}]   Available IDs: ${attachedAssetPaths.map(a => a.id).join(', ')}`);
+          }
+        } else if (scene.type === 'media' && !scene.content?.mediaAssetId) {
+          console.log(`[${jobId}] ✗ Media scene without mediaAssetId - will show placeholder`);
+          // If Gemini created a media scene but didn't set mediaAssetId, try to assign the first attached asset
+          if (attachedAssetPaths.length > 0) {
+            const firstAsset = attachedAssetPaths[0];
+            scene.content.mediaAssetId = firstAsset.id;
+            scene.content.mediaPath = firstAsset.url;  // Use HTTP URL
+            scene.content.mediaType = firstAsset.type;
+            mediaSceneCount++;
+            console.log(`[${jobId}] ✓ Auto-assigned first attached asset: ${firstAsset.filename} -> ${firstAsset.url}`);
+          }
+        }
+      }
+
+      // If Gemini didn't create any media scenes but we have attached assets, add one
+      if (mediaSceneCount === 0 && attachedAssetPaths.length > 0) {
+        console.log(`[${jobId}] ⚠ No media scenes found! Adding a media scene for the attached asset(s)`);
+        const firstAsset = attachedAssetPaths[0];
+        const mediaScene = {
+          id: `media-${firstAsset.id}`,
+          type: 'media',
+          duration: 90, // 3 seconds at 30fps
+          content: {
+            title: firstAsset.filename.replace(/\.[^/.]+$/, ''), // filename without extension
+            mediaAssetId: firstAsset.id,
+            mediaPath: firstAsset.url,  // Use HTTP URL
+            mediaType: firstAsset.type,
+            mediaStyle: 'framed',
+            color: '#f97316',
+          }
+        };
+        // Insert media scene near the beginning (after the first scene if there is one)
+        if (sceneData.scenes.length > 1) {
+          sceneData.scenes.splice(1, 0, mediaScene);
+        } else {
+          sceneData.scenes.push(mediaScene);
+        }
+        sceneData.totalDuration = sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
+        console.log(`[${jobId}] ✓ Added media scene for: ${firstAsset.filename} -> ${firstAsset.url}`);
+      }
+    }
+
     // Step 2: Write props to JSON file for Remotion
+    // Log final scene data for debugging
+    console.log(`[${jobId}] Final scene data:`);
+    for (const scene of sceneData.scenes) {
+      const hasMedia = scene.content?.mediaPath ? `mediaPath: ${scene.content.mediaPath}` : 'no media';
+      console.log(`[${jobId}]   - ${scene.type}: ${scene.content?.title || '(no title)'} | ${hasMedia}`);
+    }
     writeFileSync(propsPath, JSON.stringify(sceneData, null, 2));
     console.log(`[${jobId}] Props written to ${propsPath}`);
 
@@ -3954,6 +4114,223 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
 
   } catch (error) {
     console.error('Animation edit error:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
+// Generate image using fal.ai nano-banana-pro model (Picasso agent)
+async function handleGenerateImage(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  const falApiKey = process.env.FAL_API_KEY;
+  if (!falApiKey) {
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'FAL_API_KEY not configured in .dev.vars' }));
+    return;
+  }
+
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+
+  try {
+    const body = await parseBody(req);
+    const {
+      prompt,
+      aspectRatio = '16:9',
+      resolution = '1K',
+      numImages = 1
+    } = body;
+
+    if (!prompt) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'prompt is required' }));
+      return;
+    }
+
+    const jobId = sessionId.substring(0, 8);
+    console.log(`\n[${jobId}] === PICASSO: GENERATE IMAGE ===`);
+    console.log(`[${jobId}] User prompt: ${prompt}`);
+    console.log(`[${jobId}] Aspect ratio: ${aspectRatio}, Resolution: ${resolution}`);
+
+    // Enhance prompt using Gemini for better image generation results
+    let enhancedPrompt = prompt;
+    if (geminiApiKey) {
+      try {
+        console.log(`[${jobId}] Enhancing prompt with Picasso AI...`);
+        const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+
+        const systemPrompt = `You are Picasso, an expert AI prompt engineer specializing in image generation. Your role is to transform simple user requests into detailed, visually compelling prompts that produce stunning images.
+
+## Your Expertise
+- Deep knowledge of photography, cinematography, art styles, and visual composition
+- Understanding of lighting (golden hour, studio, dramatic, soft, etc.)
+- Mastery of artistic movements (impressionism, surrealism, photorealism, etc.)
+- Knowledge of camera perspectives, lenses, and depth of field
+- Understanding of color theory and mood creation
+
+## Prompt Enhancement Guidelines
+
+1. **Visual Details**: Add specific visual elements - textures, materials, colors, patterns
+2. **Lighting**: Specify lighting conditions that enhance the mood (soft diffused light, dramatic rim lighting, golden hour glow, neon accents)
+3. **Composition**: Include framing, perspective, and focal points (close-up, wide shot, bird's eye view, rule of thirds)
+4. **Style**: Add artistic style when appropriate (cinematic, photorealistic, digital art, oil painting, etc.)
+5. **Atmosphere**: Include mood and atmosphere descriptors (ethereal, moody, vibrant, serene, dynamic)
+6. **Quality Markers**: Add quality enhancers (highly detailed, 8K, professional photography, masterpiece)
+
+## Rules
+- Keep the enhanced prompt under 200 words
+- Preserve the user's core intent - don't change WHAT they want, enhance HOW it looks
+- Don't add text/words to appear in the image unless requested
+- Output ONLY the enhanced prompt, no explanations or markdown
+- Make every image feel premium, professional, and visually striking
+
+## Examples
+
+User: "a cat sitting on a windowsill"
+Enhanced: "A majestic tabby cat lounging on a sun-drenched windowsill, soft golden hour light streaming through sheer curtains, dust particles floating in the warm light beams, cozy interior with potted plants, shallow depth of field, photorealistic, intimate portrait style, warm amber and cream color palette, highly detailed fur texture"
+
+User: "cyberpunk city"
+Enhanced: "Sprawling cyberpunk metropolis at night, towering neon-lit skyscrapers piercing through low-hanging smog, holographic advertisements reflecting off rain-slicked streets, flying vehicles with glowing thrusters, diverse crowd of augmented humans, pink and cyan neon color scheme, cinematic wide-angle shot, blade runner aesthetic, volumetric fog, raytraced reflections, 8K ultra detailed"
+
+User: "a peaceful forest"
+Enhanced: "Ancient moss-covered forest with towering redwood trees, ethereal morning mist weaving between massive trunks, soft dappled sunlight filtering through the dense canopy, ferns and wildflowers carpeting the forest floor, a gentle stream with crystal-clear water, mystical and serene atmosphere, nature photography style, rich greens and earth tones, depth and scale, photorealistic, National Geographic quality"`;
+
+        const result = await ai.models.generateContent({
+          model: 'gemini-2.0-flash',
+          contents: [{
+            role: 'user',
+            parts: [{ text: `Enhance this image prompt:\n\n"${prompt}"` }]
+          }],
+          systemInstruction: systemPrompt,
+        });
+
+        const enhanced = result.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+        if (enhanced && enhanced.length > 10) {
+          enhancedPrompt = enhanced;
+          console.log(`[${jobId}] Enhanced prompt: ${enhancedPrompt.substring(0, 100)}...`);
+        }
+      } catch (enhanceError) {
+        console.warn(`[${jobId}] Prompt enhancement failed, using original:`, enhanceError.message);
+      }
+    } else {
+      console.log(`[${jobId}] No GEMINI_API_KEY, using original prompt`);
+    }
+
+    // Call fal.ai nano-banana-pro API with enhanced prompt
+    console.log(`[${jobId}] Sending to fal.ai...`);
+    const falResponse = await fetch('https://fal.run/fal-ai/nano-banana-pro', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Key ${falApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        prompt: enhancedPrompt,
+        num_images: Math.min(numImages, 4),
+        aspect_ratio: aspectRatio,
+        resolution,
+        output_format: 'png',
+        sync_mode: true,
+      }),
+    });
+
+    if (!falResponse.ok) {
+      const errorText = await falResponse.text();
+      console.error(`[${jobId}] fal.ai error:`, errorText);
+      throw new Error(`fal.ai API error: ${falResponse.status} - ${errorText}`);
+    }
+
+    const falResult = await falResponse.json();
+    console.log(`[${jobId}] Generated ${falResult.images?.length || 0} images`);
+
+    if (!falResult.images || falResult.images.length === 0) {
+      throw new Error('No images generated');
+    }
+
+    // Download and save each generated image as an asset
+    const generatedAssets = [];
+
+    for (let i = 0; i < falResult.images.length; i++) {
+      const imageData = falResult.images[i];
+      const imageId = randomUUID();
+      const imagePath = join(session.assetsDir, `${imageId}.png`);
+      const thumbPath = join(session.assetsDir, `${imageId}_thumb.jpg`);
+
+      console.log(`[${jobId}] Downloading image ${i + 1}...`);
+
+      // Download image
+      const imageResponse = await fetch(imageData.url);
+      if (!imageResponse.ok) {
+        throw new Error(`Failed to download image: ${imageResponse.status}`);
+      }
+
+      const buffer = await imageResponse.arrayBuffer();
+      writeFileSync(imagePath, Buffer.from(buffer));
+
+      // Generate thumbnail
+      try {
+        await runFFmpeg([
+          '-y', '-i', imagePath,
+          '-vf', 'scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2',
+          '-frames:v', '1',
+          thumbPath
+        ], jobId);
+      } catch (e) {
+        console.warn(`[${jobId}] Thumbnail generation failed:`, e.message);
+      }
+
+      const { stat } = await import('fs/promises');
+      const stats = await stat(imagePath);
+
+      // Create short filename from prompt
+      const shortPrompt = prompt.substring(0, 30).replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '-');
+
+      const asset = {
+        id: imageId,
+        type: 'image',
+        filename: `picasso-${shortPrompt}.png`,
+        path: imagePath,
+        thumbPath: existsSync(thumbPath) ? thumbPath : null,
+        duration: 5, // Default 5 seconds for images on timeline
+        size: stats.size,
+        width: imageData.width || 1024,
+        height: imageData.height || 1024,
+        createdAt: Date.now(),
+        aiGenerated: true,
+        generatedBy: 'picasso',
+        prompt: prompt, // Original user prompt
+        enhancedPrompt: enhancedPrompt !== prompt ? enhancedPrompt : undefined, // Enhanced prompt if different
+      };
+
+      session.assets.set(imageId, asset);
+      generatedAssets.push({
+        id: imageId,
+        filename: asset.filename,
+        width: asset.width,
+        height: asset.height,
+        thumbnailUrl: `/session/${sessionId}/assets/${imageId}/thumbnail`,
+        streamUrl: `/session/${sessionId}/assets/${imageId}/stream`,
+      });
+
+      console.log(`[${jobId}] Saved image: ${asset.filename} (${(stats.size / 1024).toFixed(1)} KB)`);
+    }
+
+    console.log(`[${jobId}] === PICASSO COMPLETE ===\n`);
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({
+      success: true,
+      images: generatedAssets,
+      description: falResult.description,
+    }));
+
+  } catch (error) {
+    console.error('Image generation error:', error);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -5328,6 +5705,10 @@ const server = http.createServer(async (req, res) => {
     // Edit existing animation with new prompt
     else if (req.method === 'POST' && action === 'edit-animation') {
       await handleEditAnimation(req, res, sessionId);
+    }
+    // Generate image with fal.ai (Picasso agent)
+    else if (req.method === 'POST' && action === 'generate-image') {
+      await handleGenerateImage(req, res, sessionId);
     }
     // Process asset with FFmpeg command
     else if (req.method === 'POST' && action === 'process-asset') {

@@ -235,11 +235,18 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   }, [draggingLayer, dragStart, onLayerMove]);
 
   // Aspect ratio styles
-  const aspectRatioClass = aspectRatio === '9:16' ? 'aspect-[9/16] max-h-[70vh]' : 'aspect-video max-w-4xl';
+  const isVertical = aspectRatio === '9:16';
+  // Use object-contain to show full video without cropping
+  const videoFitClass = 'object-contain';
+
+  // Container classes based on aspect ratio
+  const containerClass = isVertical
+    ? 'h-[65vh] w-auto aspect-[9/16]'  // Vertical: fixed height, width from aspect ratio
+    : 'w-full max-w-4xl aspect-video';  // Horizontal: constrain width, height follows
 
   if (layers.length === 0) {
     return (
-      <div className={`relative w-full ${aspectRatioClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
+      <div className={`relative ${containerClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
         <div className="text-center text-zinc-600">
           <Play className="w-12 h-12 mx-auto mb-2 opacity-50" />
           <p className="text-sm">No media to display</p>
@@ -257,7 +264,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   return (
     <div
       ref={containerRef}
-      className={`relative w-full ${aspectRatioClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10`}
+      className={`relative ${containerClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10`}
     >
       {/* Base video layer (V1) - rendered separately for stability */}
       {foundBaseLayer && (
@@ -265,7 +272,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           key="base-video"
           ref={videoRef}
           src={foundBaseLayer.url}
-          className="absolute inset-0 w-full h-full object-contain"
+          className={`absolute inset-0 w-full h-full ${videoFitClass}`}
           style={{ zIndex: 1 }}
           playsInline
           preload="auto"
@@ -292,7 +299,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 }
               }}
               src={layer.url}
-              className={`absolute inset-0 w-full h-full object-contain cursor-grab active:cursor-grabbing ${
+              className={`absolute inset-0 w-full h-full ${videoFitClass} cursor-grab active:cursor-grabbing ${
                 isSelected ? 'ring-2 ring-orange-500 ring-offset-2 ring-offset-black' : ''
               }`}
               style={styles}
