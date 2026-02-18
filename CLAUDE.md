@@ -9,7 +9,7 @@ ClipWise (formerly HyperEdit) is an AI-powered video editor built with React 19,
 ## Commands
 
 ```bash
-npm install              # Install dependencies
+npm install --legacy-peer-deps  # Install dependencies (required due to Vite 7 peer dep conflict)
 npm run dev              # Start Vite dev server
 npm run ffmpeg-server    # Start local FFmpeg server (port 3333) - run in separate terminal
 npm run build            # TypeScript + Vite production build
