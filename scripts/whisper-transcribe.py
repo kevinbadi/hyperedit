@@ -29,6 +29,7 @@ def transcribe(audio_path, model_size="base"):
     # Load model (will download on first use)
     # Models: tiny, base, small, medium, large
     # base is a good balance of speed and accuracy
+    # Note: MPS (Apple GPU) doesn't work with Whisper's sparse tensors, so we use CPU
     print(f"Loading Whisper model '{model_size}'...", file=sys.stderr)
     model = whisper.load_model(model_size)
 

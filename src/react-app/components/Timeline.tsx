@@ -348,15 +348,35 @@ export default function Timeline({
             ref={trackHeadersRef}
             className="flex-1 overflow-hidden"
           >
-            {sortedTracks.map(track => (
-              <div
-                key={track.id}
-                className="flex items-center justify-center text-xs font-medium text-zinc-400 border-b border-zinc-800/50"
-                style={{ height: TRACK_HEIGHTS[track.type] }}
-              >
-                {track.name}
-              </div>
-            ))}
+            {sortedTracks.map(track => {
+              const trackClipCount = clips.filter(c => c.trackId === track.id).length;
+              const isTextTrack = track.type === 'text' && trackClipCount > 0;
+
+              return (
+                <div
+                  key={track.id}
+                  className="flex items-center justify-center gap-1 text-xs font-medium text-zinc-400 border-b border-zinc-800/50 px-1"
+                  style={{ height: TRACK_HEIGHTS[track.type] }}
+                >
+                  <span className="truncate">{track.name}</span>
+                  {isTextTrack && (
+                    <button
+                      title={`Delete all ${trackClipCount} captions`}
+                      className="p-0.5 rounded hover:bg-red-500/20 hover:text-red-400 transition-colors flex-shrink-0"
+                      onClick={() => {
+                        if (confirm(`Delete all ${trackClipCount} captions on ${track.name}?`)) {
+                          clips
+                            .filter(c => c.trackId === track.id)
+                            .forEach(c => onDeleteClip(c.id));
+                        }
+                      }}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
 

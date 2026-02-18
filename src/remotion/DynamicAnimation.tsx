@@ -335,13 +335,20 @@ const AnimatedText: React.FC<{
   fontWeight?: string | number;
 }> = ({ text, fontSize, color, delay = 0, style = 'bounce', fontWeight = 'bold' }) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
+  const { fps, durationInFrames } = useVideoConfig();
   const characters = text.split('');
+
+  // Scale character stagger based on scene duration so text always fully appears
+  // For short scenes (<60 frames), use minimal stagger; for longer scenes, more dramatic
+  const maxStaggerTime = Math.min(durationInFrames * 0.3, 40); // Use at most 30% of scene for text entrance
+  const charStagger = characters.length > 1 ? Math.min(2, maxStaggerTime / characters.length) : 0;
+  // Also scale the delay proportionally for short scenes
+  const scaledDelay = durationInFrames < 90 ? Math.min(delay, durationInFrames * 0.15) : delay;
 
   return (
     <div style={{ display: 'flex', justifyContent: 'center', flexWrap: 'wrap' }}>
       {characters.map((char, i) => {
-        const charDelay = delay + i * 2;
+        const charDelay = scaledDelay + i * charStagger;
 
         let transform = '';
         let opacity = 1;
@@ -920,11 +927,16 @@ const TitleScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
     config: { damping: 12, stiffness: 100 },
   });
 
-  const subtitleOpacity = interpolate(frame, [20, 40], [0, 1], { extrapolateRight: 'clamp' });
-  const subtitleY = interpolate(frame, [20, 40], [20, 0], { extrapolateRight: 'clamp' });
+  // Scale animation timing based on scene duration
+  const isShort = durationInFrames < 90;
+  const subtitleStart = isShort ? Math.round(durationInFrames * 0.15) : 20;
+  const subtitleEnd = isShort ? Math.round(durationInFrames * 0.35) : 40;
+  const subtitleOpacity = interpolate(frame, [subtitleStart, subtitleEnd], [0, 1], { extrapolateRight: 'clamp' });
+  const subtitleY = interpolate(frame, [subtitleStart, subtitleEnd], [20, 0], { extrapolateRight: 'clamp' });
 
   // Exit animation
-  const exitProgress = interpolate(frame, [durationInFrames - 20, durationInFrames], [0, 1], { extrapolateRight: 'clamp' });
+  const exitFrames = isShort ? Math.round(durationInFrames * 0.2) : 20;
+  const exitProgress = interpolate(frame, [durationInFrames - exitFrames, durationInFrames], [0, 1], { extrapolateRight: 'clamp' });
   const exitScale = interpolate(exitProgress, [0, 1], [1, 0.8]);
   const exitOpacity = interpolate(exitProgress, [0, 1], [1, 0]);
 
@@ -977,7 +989,7 @@ const TitleScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
               fontSize={36}
               color="#a1a1aa"
               style="wave"
-              delay={25}
+              delay={isShort ? Math.round(durationInFrames * 0.15) : 25}
               fontWeight={400}
             />
           </div>
@@ -1051,7 +1063,14 @@ const StepsScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
         }}
       >
         {items.map((item, index) => {
-          const delay = 20 + index * 15;
+          // Scale stagger based on scene duration so all items appear in time
+          const itemStagger = durationInFrames < 90
+            ? Math.round(durationInFrames * 0.08)
+            : 15;
+          const itemStart = durationInFrames < 90
+            ? Math.round(durationInFrames * 0.1)
+            : 20;
+          const delay = itemStart + index * itemStagger;
 
           const itemSpring = spring({
             frame: frame - delay,
@@ -1181,10 +1200,11 @@ const extractNumericFromString = (valueStr: string): { numericValue: number; pre
 // Enhanced Stats Scene with counting animation
 const StatsScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
+  const { fps, durationInFrames } = useVideoConfig();
   const stats = content.stats || [];
   const accentColor = content.color || '#f97316';
   const colors = [accentColor, '#3b82f6', '#22c55e', '#8b5cf6', '#ec4899'];
+  const isShort = durationInFrames < 90;
 
   // Process stats to ensure numericValue is set (client-side fallback)
   const processedStats = useMemo(() => {
@@ -1258,7 +1278,9 @@ const StatsScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
 
       <div style={{ display: 'flex', gap: 120, justifyContent: 'center', flexWrap: 'wrap', maxWidth: 1400 }}>
         {processedStats.map((stat, index) => {
-          const delay = 15 + index * 12;
+          const statStagger = isShort ? Math.round(durationInFrames * 0.08) : 12;
+          const statStart = isShort ? Math.round(durationInFrames * 0.1) : 15;
+          const delay = statStart + index * statStagger;
           const statColor = colors[index % colors.length];
 
           const entrySpring = spring({
@@ -1296,7 +1318,7 @@ const StatsScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
                   fontSize={96}
                   color={statColor}
                   delay={delay}
-                  duration={75} // 2.5 seconds for dramatic counting
+                  duration={isShort ? Math.round(durationInFrames * 0.5) : 75}
                 />
               ) : (
                 <div
@@ -1343,10 +1365,11 @@ const TextScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
   const frame = useCurrentFrame();
   const { durationInFrames } = useVideoConfig();
   const accentColor = content.color || '#ffffff';
+  const exitFrames = durationInFrames < 90 ? Math.round(durationInFrames * 0.2) : 20;
 
   const exitOpacity = interpolate(
     frame,
-    [durationInFrames - 20, durationInFrames],
+    [durationInFrames - exitFrames, durationInFrames],
     [1, 0],
     { extrapolateRight: 'clamp' }
   );

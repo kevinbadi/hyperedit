@@ -871,8 +871,8 @@ export default function Home() {
       throw new Error('No session available');
     }
 
-    // Check if we have a video asset
-    const videoAsset = assets.find(a => a.type === 'video');
+    // Check if we have a video asset (prefer original, non-AI-generated)
+    const videoAsset = assets.find(a => a.type === 'video' && !a.aiGenerated) || assets.find(a => a.type === 'video');
     if (!videoAsset) {
       throw new Error('Please upload a video first');
     }
@@ -880,12 +880,13 @@ export default function Home() {
     console.log('Removing dead air from video...');
 
     // Call the remove-dead-air endpoint
+    // -26dB catches real pauses, 0.4s avoids cutting natural speech rhythm
     const response = await fetch(`http://localhost:3333/session/${session.sessionId}/remove-dead-air`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        silenceThreshold: -30, // dB threshold
-        minSilenceDuration: 0.3, // minimum silence duration in seconds
+        silenceThreshold: -26, // dB threshold
+        minSilenceDuration: 0.4, // minimum silence duration in seconds
       }),
     });
 
@@ -897,19 +898,30 @@ export default function Home() {
     const result = await response.json();
     console.log('Dead air removal result:', result);
 
-    // Refresh assets to get the updated video
-    await refreshAssets();
+    // Refresh assets to get the updated video with new cache-busting URL
+    const refreshedAssets = await refreshAssets();
 
-    // Update the video clip duration if needed
+    // Find the current original video asset from refreshed data
+    const assetPool = refreshedAssets.length > 0 ? refreshedAssets : assets;
+    const currentVideoAsset = assetPool.find(a => a.type === 'video' && !a.aiGenerated) || assetPool.find(a => a.type === 'video');
+
+    // Update V1 clip: fix asset reference + update duration
     if (result.duration) {
-      const v1Clip = clips.find(c => c.trackId === 'V1' && c.assetId === videoAsset.id);
+      const v1Clip = clips.find(c => c.trackId === 'V1');
       if (v1Clip) {
-        updateClip(v1Clip.id, {
+        const updates: Partial<typeof v1Clip> = {
           duration: result.duration,
           outPoint: result.duration,
-        });
-        await saveProject();
+        };
+        // Also fix asset ID if it's stale (e.g., after server restart)
+        if (currentVideoAsset && v1Clip.assetId !== currentVideoAsset.id) {
+          console.log(`[DeadAir] Fixing stale asset ref: ${v1Clip.assetId} -> ${currentVideoAsset.id}`);
+          updates.assetId = currentVideoAsset.id;
+        }
+        console.log(`[DeadAir] Updating clip ${v1Clip.id}: duration ${v1Clip.duration} -> ${result.duration}`);
+        updateClip(v1Clip.id, updates);
       }
+      await saveProject();
     }
 
     return {
@@ -924,8 +936,8 @@ export default function Home() {
       throw new Error('No session available');
     }
 
-    // Find the video asset to transcribe
-    const videoAsset = assets.find(a => a.type === 'video');
+    // Find the original (non-AI-generated) video asset to transcribe
+    const videoAsset = assets.find(a => a.type === 'video' && !a.aiGenerated) || assets.find(a => a.type === 'video');
 
     if (!videoAsset || videoAsset.type !== 'video') {
       throw new Error('Please upload a video first');

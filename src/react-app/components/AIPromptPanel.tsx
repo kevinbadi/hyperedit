@@ -1040,8 +1040,30 @@ export default function AIPromptPanel({
     }
 
     // Create new animation (explicit creation requests)
-    if ((lower.includes('create') || lower.includes('make') || lower.includes('generate')) &&
-        (lower.includes('animation') || lower.includes('animated') || lower.includes('motion'))) {
+    if ((lower.includes('create') || lower.includes('make') || lower.includes('generate') ||
+         lower.includes('add') || lower.includes('build') || lower.includes('design')) &&
+        (lower.includes('animation') || lower.includes('animated') || lower.includes('motion') ||
+         lower.includes('graphic') || lower.includes('visual') || lower.includes('overlay') ||
+         lower.includes('intro') || lower.includes('outro') || lower.includes('title card') ||
+         lower.includes('text overlay') || lower.includes('infographic') || lower.includes('scene'))) {
+      return 'create-animation';
+    }
+
+    // Remotion animation keywords without explicit create/make verbs
+    // Things like "a title card showing...", "intro with my logo", "stats animation"
+    if (lower.includes('animation') || lower.includes('animated') ||
+        lower.includes('title card') || lower.includes('intro ') || lower.includes('outro ') ||
+        lower.includes('end screen') || lower.includes('infographic') ||
+        lower.includes('text effect') || lower.includes('kinetic text') ||
+        lower.includes('data visual') || lower.includes('chart ') || lower.includes('graph ') ||
+        lower.includes('countdown') || lower.includes('timer') ||
+        lower.includes('logo animation') || lower.includes('logo reveal') ||
+        lower.includes('screen mockup') || lower.includes('phone mockup') ||
+        lower.includes('social proof') || lower.includes('comparison')) {
+      // If we have an animation in context, edit it
+      if (ctx.editTabHasAnimation || ctx.selectedClipIsAiAnimation) {
+        return 'edit-animation';
+      }
       return 'create-animation';
     }
 
@@ -1070,8 +1092,9 @@ export default function AIPromptPanel({
       return 'ffmpeg-edit';
     }
 
-    // Default: if nothing specific matched, use ffmpeg for general edits
-    return 'ffmpeg-edit';
+    // Default: for creative/visual requests, prefer animation over FFmpeg
+    // Only use ffmpeg-edit when the user clearly wants video manipulation
+    return 'create-animation';
   };
 
   // Handle chapter cuts workflow

@@ -89,6 +89,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   selectedLayerId,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const loadedSrcRef = useRef<string | null>(null);
   const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const containerRef = useRef<HTMLDivElement>(null);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
@@ -125,6 +126,23 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     getVideoElement: () => videoRef.current,
   }));
 
+  // Reload video when source URL changes (e.g., after dead air removal)
+  // Using stable key + manual load() preserves the audio permission from user gesture
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !baseLayerUrl) return;
+    if (loadedSrcRef.current !== baseLayerUrl) {
+      if (loadedSrcRef.current) {
+        console.log('[VideoPreview] Source changed, reloading video with audio');
+        console.log('[VideoPreview] Old:', loadedSrcRef.current?.slice(-60));
+        console.log('[VideoPreview] New:', baseLayerUrl.slice(-60));
+      }
+      video.src = baseLayerUrl;
+      video.load();
+      loadedSrcRef.current = baseLayerUrl;
+    }
+  }, [baseLayerUrl]);
+
   // Seek control for base video (only when paused/scrubbing)
   useEffect(() => {
     const video = videoRef.current;
@@ -142,7 +160,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     if (!video) return;
 
     if (isPlaying) {
-      video.play().catch(() => {});
+      console.log('[VideoPreview] Playing base video:', { src: video.src?.slice(-60), muted: video.muted, volume: video.volume, readyState: video.readyState, networkState: video.networkState });
+      video.play().catch((err) => {
+        console.error('[VideoPreview] Play failed:', err.name, err.message);
+      });
     } else {
       video.pause();
     }
@@ -269,7 +290,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       {/* Base video layer (V1) - rendered separately for stability */}
       {foundBaseLayer && (
         <video
-          key={`base-video-${foundBaseLayer.url}`}
+          key="base-video"
           ref={videoRef}
           src={foundBaseLayer.url}
           className={`absolute inset-0 w-full h-full ${videoFitClass}`}

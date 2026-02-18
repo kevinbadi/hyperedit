@@ -170,6 +170,7 @@ function restoreSessionsFromDisk() {
       editCount: 0,
       assets,
       project: projectState,
+      transcriptCache: new Map(),
     };
 
     sessions.set(sessionId, session);
@@ -501,49 +502,38 @@ async function handleRemoveDeadAir(req, res) {
     const removedDuration = totalDuration - totalKeptDuration;
     console.log(`[${jobId}] Removing ${removedDuration.toFixed(2)}s of dead air (${((removedDuration / totalDuration) * 100).toFixed(1)}%)`);
 
-    // Step 4: Extract each segment (re-encode for accuracy)
-    console.log(`[${jobId}] Extracting segments (re-encoding for frame accuracy)...`);
+    // Single-pass trim+concat filter to keep audio and video in sync
+    console.log(`[${jobId}] Building filter chain for ${keepSegments.length} segments...`);
+
+    const filterParts = [];
+    const videoStreams = [];
+    const audioStreams = [];
+
     for (let i = 0; i < keepSegments.length; i++) {
       const seg = keepSegments[i];
-      const segmentPath = join(TEMP_DIR, `${jobId}-segment-${i}.mp4`);
-      segmentPaths.push(segmentPath);
-
-      // Use -ss after -i for accurate seeking, re-encode to ensure all frames included
-      const args = [
-        '-y',
-        '-i', inputPath,
-        '-ss', seg.start.toString(),
-        '-t', (seg.end - seg.start).toString(),
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast', // Fast encoding for segments
-        '-crf', '18',
-        '-c:a', 'aac',
-        '-b:a', '192k',
-        segmentPath
-      ];
-
-      await runFFmpeg(args, jobId);
-      console.log(`\n[${jobId}] Extracted segment ${i + 1}/${keepSegments.length}`);
+      filterParts.push(`[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}]`);
+      filterParts.push(`[0:a]atrim=start=${seg.start}:end=${seg.end},asetpts=PTS-STARTPTS[a${i}]`);
+      videoStreams.push(`[v${i}]`);
+      audioStreams.push(`[a${i}]`);
     }
 
-    // Step 5: Create concat list file
-    const concatList = segmentPaths.map(p => `file '${p}'`).join('\n');
-    writeFileSync(concatListPath, concatList);
+    filterParts.push(`${videoStreams.join('')}concat=n=${keepSegments.length}:v=1:a=0[outv]`);
+    filterParts.push(`${audioStreams.join('')}concat=n=${keepSegments.length}:v=0:a=1[outa]`);
 
-    // Step 6: Concatenate all segments (just copy since they're already encoded)
-    console.log(`[${jobId}] Concatenating ${keepSegments.length} segments...`);
-    const concatArgs = [
-      '-y',
-      '-f', 'concat',
-      '-safe', '0',
-      '-i', concatListPath,
-      '-c', 'copy',
+    const filterComplex = filterParts.join(';');
+
+    const args = [
+      '-y', '-i', inputPath,
+      '-filter_complex', filterComplex,
+      '-map', '[outv]', '-map', '[outa]',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
+      '-c:a', 'aac', '-b:a', '192k',
       '-movflags', '+faststart',
       outputPath
     ];
 
-    await runFFmpeg(concatArgs, jobId);
-    console.log(`\n[${jobId}] Concatenation complete`);
+    await runFFmpeg(args, jobId);
+    console.log(`\n[${jobId}] Dead air removal complete`);
 
     // Read output file and send it back
     const outputStats = await stat(outputPath);
@@ -1160,12 +1150,21 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
 
     console.log(`\n[${jobId}] === DEAD AIR REMOVAL (Session) ===`);
 
-    // Find the video asset (use new multi-asset system instead of legacy currentVideo)
+    // Find the original (non-AI-generated) video asset
     let videoAsset = null;
     for (const [assetId, asset] of session.assets) {
-      if (asset.type === 'video') {
+      if (asset.type === 'video' && !asset.aiGenerated) {
         videoAsset = asset;
         break;
+      }
+    }
+    // Fallback to any video if no original found
+    if (!videoAsset) {
+      for (const [assetId, asset] of session.assets) {
+        if (asset.type === 'video') {
+          videoAsset = asset;
+          break;
+        }
       }
     }
 
@@ -1242,6 +1241,31 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
     console.log(`[${jobId}] Concatenating...`);
     await runFFmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', concatListPath, '-c', 'copy', '-movflags', '+faststart', outputPath], jobId);
 
+    console.log(`\n[${jobId}] Dead air removal complete`);
+
+    // Verify output has audio before replacing original
+    const probeResult = execSync(
+      `ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "${outputPath}"`,
+      { encoding: 'utf-8' }
+    );
+    const streams = probeResult.trim().split('\n');
+    console.log(`\n🔍 [${jobId}] OUTPUT FILE PROBE:`);
+    console.log(`🔍 [${jobId}]   Streams: ${streams.join(', ')}`);
+    console.log(`🔍 [${jobId}]   Has video: ${streams.includes('video')}`);
+    console.log(`🔍 [${jobId}]   Has audio: ${streams.includes('audio')}`);
+    console.log(`🔍 [${jobId}]   Output path: ${outputPath}`);
+
+    // Also probe the ORIGINAL file for comparison
+    const origProbe = execSync(
+      `ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "${videoAsset.path}"`,
+      { encoding: 'utf-8' }
+    );
+    console.log(`🔍 [${jobId}]   Original streams: ${origProbe.trim().split('\n').join(', ')}`);
+
+    // Cleanup segments
+    segmentPaths.forEach(p => { try { unlinkSync(p); } catch {} });
+    try { unlinkSync(concatListPath); } catch {}
+
     // Replace the video asset file
     const { rename, stat } = await import('fs/promises');
     unlinkSync(videoAsset.path);
@@ -1304,13 +1328,23 @@ async function handleSessionChapters(req, res, sessionId) {
     // Find video path - check both legacy currentVideo and new assets system
     let videoPath = session.currentVideo;
     if (!videoPath || !existsSync(videoPath)) {
-      // Try to find video from assets
+      // Try to find original (non-AI) video from assets
       if (session.assets && session.assets.size > 0) {
         for (const [, asset] of session.assets) {
-          if (asset.type === 'video' && existsSync(asset.path)) {
+          if (asset.type === 'video' && !asset.aiGenerated && existsSync(asset.path)) {
             videoPath = asset.path;
             console.log(`[${jobId}] Using video asset: ${asset.filename}`);
             break;
+          }
+        }
+        // Fallback to any video
+        if (!videoPath || !existsSync(videoPath)) {
+          for (const [, asset] of session.assets) {
+            if (asset.type === 'video' && existsSync(asset.path)) {
+              videoPath = asset.path;
+              console.log(`[${jobId}] Using video asset (fallback): ${asset.filename}`);
+              break;
+            }
           }
         }
       }
@@ -2940,11 +2974,20 @@ async function handleTranscribe(req, res, sessionId) {
     if (assetId) {
       videoAsset = session.assets.get(assetId);
     } else {
-      // If no assetId, find the first video asset
+      // If no assetId, prefer the original (non-AI-generated) video asset
       for (const asset of session.assets.values()) {
-        if (asset.type === 'video') {
+        if (asset.type === 'video' && !asset.aiGenerated) {
           videoAsset = asset;
           break;
+        }
+      }
+      // Fallback to any video if no non-AI video found
+      if (!videoAsset) {
+        for (const asset of session.assets.values()) {
+          if (asset.type === 'video') {
+            videoAsset = asset;
+            break;
+          }
         }
       }
     }
@@ -3169,8 +3212,8 @@ Guidelines:
       res.end(JSON.stringify({
         error: 'No speech detected. Make sure the video has clear, audible speech.',
         debug: {
-          rawResponseLength: responseText.length,
-          rawResponsePreview: responseText.substring(0, 200)
+          transcriptionText: (transcription.text || '').substring(0, 200),
+          wordCount: (transcription.words || []).length
         }
       }));
       return;
@@ -3208,12 +3251,17 @@ async function handleTranscribeAndExtract(req, res, sessionId) {
   try {
     console.log(`\n[${jobId}] === TRANSCRIBE & EXTRACT KEYWORDS ===`);
 
-    // Find the first video asset in the session
+    // Find the original (non-AI-generated) video asset
     let videoAsset = null;
     for (const asset of session.assets.values()) {
-      if (asset.type === 'video') {
+      if (asset.type === 'video' && !asset.aiGenerated) {
         videoAsset = asset;
         break;
+      }
+    }
+    if (!videoAsset) {
+      for (const asset of session.assets.values()) {
+        if (asset.type === 'video') { videoAsset = asset; break; }
       }
     }
 
@@ -3428,12 +3476,17 @@ async function handleGenerateBroll(req, res, sessionId) {
       return;
     }
 
-    // Find the first video asset in the session
+    // Find the original (non-AI-generated) video asset
     let videoAsset = null;
     for (const asset of session.assets.values()) {
-      if (asset.type === 'video') {
+      if (asset.type === 'video' && !asset.aiGenerated) {
         videoAsset = asset;
         break;
+      }
+    }
+    if (!videoAsset) {
+      for (const asset of session.assets.values()) {
+        if (asset.type === 'video') { videoAsset = asset; break; }
       }
     }
 
@@ -3961,7 +4014,7 @@ Return ONLY valid JSON (no markdown, no code blocks) with this structure:
     {
       "id": "unique-id",
       "type": "title" | "steps" | "features" | "stats" | "text" | "transition" | "media" | "chart" | "comparison" | "countdown" | "shapes" | "emoji" | "gif" | "lottie",
-      "duration": <number of frames at 30fps, typically 60-150>,
+      "duration": <number of frames at 30fps, typically 45-90 (1.5-3 seconds per scene). Keep scenes SHORT and punchy!>,
       "content": {
         "title": "optional title text",
         "subtitle": "optional subtitle",
@@ -4092,7 +4145,9 @@ Scene transitions (add to scene to animate entry/exit):
 - "duration": frames for transition (default 15, use 20-30 for dramatic)
 
 Guidelines:
-- Keep it concise: 3-6 scenes max
+- Use MORE scenes with SHORTER durations (1.5-3 seconds each, 45-90 frames). Fast cuts feel dynamic and engaging!
+- For a 5s animation use 3-4 scenes, for 10s use 5-7 scenes, for 15s use 7-10 scenes, for 30s use 12-18 scenes. Scale up proportionally.
+- NO scene should exceed 120 frames (4 seconds) unless it's a countdown or media showcase.
 - Total duration: ${durationSeconds ? `EXACTLY ${durationSeconds} seconds (${Math.round(durationSeconds * fps)} frames) - the user specifically requested this duration!` : '5-15 seconds (150-450 frames)'}
 - Use vibrant colors: #f97316 (orange), #3b82f6 (blue), #22c55e (green), #8b5cf6 (purple), #ec4899 (pink)
 - Make it visually engaging with good pacing
@@ -4108,6 +4163,15 @@ IMPORTANT - ADD CAMERA MOVEMENTS to make scenes dynamic:
 - When showing numbers/stats, use numericValue for animated counting effect
 - ADD TRANSITIONS between scenes! Use "swipe-left" or "swipe-right" for dynamic flow, "fade" for elegance, or "zoom-in" for impact
 - Mix transition types for variety (e.g., first scene: swipe-right, second: fade, third: swipe-left)
+
+IMPORTANT - ADD GIF SCENES for humor and engagement:
+- ALWAYS include at least 1-2 "gif" type scenes in every animation for comedic/reaction effects!
+- Use "gifSearch" with funny, relevant search terms that match the topic (e.g., "mind blown", "excited", "wait what", "money rain", "mic drop")
+- Place GIF scenes BETWEEN informational scenes as punchlines or reactions to what was just shown
+- Use "gifLayout": "fullscreen" for maximum impact, or "pip" for a subtle corner reaction
+- GIFs make animations feel fun, relatable, and meme-worthy - lean into humor!
+- Example: After a stats scene showing impressive numbers, add a "gif" scene with "gifSearch": "mind blown" or "impressed"
+- For intros, try "lets go" or "hype". For outros, try "mic drop" or "thats all folks"
 ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the attached images/videos!
 - Use "mediaAnimation": {"type": "ken-burns", "intensity": 0.3} to add dynamic movement to images/videos
 - Use "background" mediaStyle with "overlayText" for cinematic text-over-video effect
@@ -4143,7 +4207,25 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
       console.log(`[${jobId}] ⚠️ No camera movements in any scene`);
     }
 
-    const totalDuration = sceneData.totalDuration || sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
+    let totalDuration = sceneData.totalDuration || sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
+
+    // Enforce user-requested duration by scaling scene durations proportionally
+    if (durationSeconds) {
+      const targetFrames = Math.round(durationSeconds * fps);
+      if (totalDuration !== targetFrames && totalDuration > 0) {
+        const scale = targetFrames / totalDuration;
+        console.log(`[${jobId}] ⏱️ Adjusting duration: Gemini gave ${totalDuration} frames (${(totalDuration / fps).toFixed(1)}s), user requested ${durationSeconds}s (${targetFrames} frames). Scale: ${scale.toFixed(2)}x`);
+        for (const scene of sceneData.scenes) {
+          const oldDuration = scene.duration;
+          scene.duration = Math.max(1, Math.round(scene.duration * scale));
+          console.log(`[${jobId}]   Scene "${scene.id}": ${oldDuration} → ${scene.duration} frames`);
+        }
+        totalDuration = sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
+        sceneData.totalDuration = totalDuration;
+        console.log(`[${jobId}] ⏱️ Adjusted total: ${totalDuration} frames (${(totalDuration / fps).toFixed(1)}s)`);
+      }
+    }
+
     const durationInSeconds = totalDuration / fps;
 
     // Inject actual asset file paths for attached media (use absolute file paths for Remotion CLI)
@@ -4327,7 +4409,7 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
       '--height', String(height),
       '--codec', 'h264',
       '--overwrite',
-      '--gl=swangle', // Software WebGL for headless rendering
+      '--gl=angle', // Use Metal GPU acceleration on macOS
     ];
 
     await new Promise((resolve, reject) => {
@@ -4745,7 +4827,7 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
       '--height', String(height),
       '--codec', 'h264',
       '--overwrite',
-      '--gl=swangle', // Software WebGL for headless rendering
+      '--gl=angle', // Use Metal GPU acceleration on macOS
     ];
 
     await new Promise((resolve, reject) => {
@@ -5901,7 +5983,7 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`
         '--height', String(height),
         '--codec', 'h264',
         '--overwrite',
-        '--gl=swangle', // Software WebGL for headless rendering
+        '--gl=angle', // Use Metal GPU acceleration on macOS
       ];
 
       await new Promise((resolve, reject) => {
@@ -6445,7 +6527,7 @@ async function handleRenderFromConcept(req, res, sessionId) {
       '--height', String(height),
       '--codec', 'h264',
       '--overwrite',
-      '--gl=swangle', // Software WebGL for headless rendering
+      '--gl=angle', // Use Metal GPU acceleration on macOS
     ];
 
     console.log(`[${jobId}] Remotion command: npx ${remotionArgs.join(' ')}`);
@@ -6803,7 +6885,7 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
       '--height', String(height),
       '--codec', 'h264',
       '--overwrite',
-      '--gl=swangle', // Software WebGL for headless rendering
+      '--gl=angle', // Use Metal GPU acceleration on macOS
     ];
 
     console.log(`[${jobId}] Remotion command: npx ${remotionArgs.join(' ')}`);
@@ -7155,7 +7237,7 @@ Use specific terms, concepts, and themes from the transcript.`;
       '--height', String(height),
       '--codec', 'h264',
       '--overwrite',
-      '--gl=swangle', // Software WebGL for headless rendering
+      '--gl=angle', // Use Metal GPU acceleration on macOS
     ];
 
     await new Promise((resolve, reject) => {
