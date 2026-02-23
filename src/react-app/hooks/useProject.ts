@@ -918,6 +918,39 @@ export function useProject() {
     setClips([]);
   }, [session]);
 
+  // Get system settings (API keys)
+  const getSystemSettings = useCallback(async (): Promise<Record<string, boolean>> => {
+    try {
+      const response = await fetch(`${LOCAL_FFMPEG_URL}/settings`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch settings');
+      }
+      return await response.json();
+    } catch (error) {
+      console.error('[Settings] Fetch failed:', error);
+      throw error;
+    }
+  }, []);
+
+  // Save system settings (API keys)
+  const saveSystemSettings = useCallback(async (updates: Record<string, string>): Promise<void> => {
+    try {
+      const response = await fetch(`${LOCAL_FFMPEG_URL}/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to save settings');
+      }
+    } catch (error) {
+      console.error('[Settings] Save failed:', error);
+      throw error;
+    }
+  }, []);
+
   // Auto-save when clips change
   // Note: This is commented out to prevent excessive saves during drag operations
   // useEffect(() => {
@@ -984,5 +1017,9 @@ export function useProject() {
     updateTabClips,
     updateTabAsset,
     getActiveTab,
+
+    // System Settings
+    getSystemSettings,
+    saveSystemSettings,
   };
 }

@@ -7624,6 +7624,105 @@ async function handleProcessAsset(req, res, sessionId) {
   }
 }
 
+// ============== SETTINGS HANDLERS ==============
+
+// Get settings (API key status)
+function handleSettingsGet(req, res) {
+  const settings = {
+    OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
+    GEMINI_API_KEY: !!process.env.GEMINI_API_KEY,
+    GIPHY_API_KEY: !!process.env.GIPHY_API_KEY,
+    FAL_KEY: !!(process.env.FAL_KEY || process.env.FAL_API_KEY),
+  };
+
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify(settings));
+}
+
+// Save settings
+async function handleSettingsSave(req, res) {
+  try {
+    const body = await parseBody(req);
+    // Only update keys that are explicitly provided in the request
+    const updates = {};
+    if (body.OPENAI_API_KEY !== undefined) updates.OPENAI_API_KEY = body.OPENAI_API_KEY;
+    if (body.GEMINI_API_KEY !== undefined) updates.GEMINI_API_KEY = body.GEMINI_API_KEY;
+    if (body.GIPHY_API_KEY !== undefined) updates.GIPHY_API_KEY = body.GIPHY_API_KEY;
+    if (body.FAL_KEY !== undefined) {
+      updates.FAL_KEY = body.FAL_KEY;
+      updates.FAL_API_KEY = body.FAL_KEY; // Sync alias
+    }
+
+    // Update process.env
+    for (const [key, value] of Object.entries(updates)) {
+      if (value) {
+        process.env[key] = value;
+      } else {
+        delete process.env[key];
+      }
+    }
+
+    // Persist to .dev.vars
+    const envPath = join(process.cwd(), '.dev.vars');
+    let envContent = '';
+
+    if (existsSync(envPath)) {
+      envContent = readFileSync(envPath, 'utf-8');
+    }
+
+    // Parse existing lines to preserve comments and structure
+    let lines = envContent.split('\n');
+    const existingKeys = new Set();
+    const newLines = [];
+
+    // Process existing lines
+    for (const line of lines) {
+      const match = line.match(/^\s*([^=#]+)\s*=(.*)$/);
+      if (match) {
+        const key = match[1].trim();
+        existingKeys.add(key);
+
+        // If this key is being updated
+        if (updates[key] !== undefined) {
+          if (updates[key]) {
+            newLines.push(`${key}=${updates[key]}`);
+          } else {
+            // If value is empty/null, remove the key (don't push line)
+          }
+        } else {
+          // Keep existing line
+          newLines.push(line);
+        }
+      } else {
+        // Keep comments/empty lines
+        newLines.push(line);
+      }
+    }
+
+    // Append new keys that weren't in the file
+    for (const [key, value] of Object.entries(updates)) {
+      if (value && !existingKeys.has(key)) {
+        // Don't duplicate FAL_API_KEY if FAL_KEY is there (or vice versa) if desired,
+        // but explicit saving is safer.
+        newLines.push(`${key}=${value}`);
+      }
+    }
+
+    // Remove trailing newlines and join
+    const finalContent = newLines.join('\n').replace(/\n+$/, '') + '\n';
+    writeFileSync(envPath, finalContent);
+    console.log('[Settings] Updated .dev.vars');
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ success: true }));
+
+  } catch (error) {
+    console.error('Settings save error:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
 // ============== SERVER ==============
 
 const server = http.createServer(async (req, res) => {
@@ -7792,6 +7891,15 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Session endpoint not found' }));
     }
+    return;
+  }
+
+  // Settings API
+  if (req.method === 'GET' && path === '/settings') {
+    handleSettingsGet(req, res);
+    return;
+  } else if (req.method === 'POST' && path === '/settings') {
+    await handleSettingsSave(req, res);
     return;
   }
 
