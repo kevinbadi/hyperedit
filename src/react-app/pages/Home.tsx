@@ -8,12 +8,13 @@ import AIPromptPanel from '@/react-app/components/AIPromptPanel';
 import PicassoPanel from '@/react-app/components/PicassoPanel';
 import DiCaprioPanel from '@/react-app/components/DiCaprioPanel';
 import GifSearchPanel from '@/react-app/components/GifSearchPanel';
+import SettingsModal from '@/react-app/components/SettingsModal';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
 import TimelineTabs from '@/react-app/components/TimelineTabs';
 import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks/useProject';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
-import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
+import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film, Settings } from 'lucide-react';
 import type { TemplateId } from '@/remotion/templates';
 
 interface ChapterData {
@@ -35,6 +36,7 @@ export default function Home() {
   const [autoSnap, setAutoSnap] = useState(true); // Ripple delete mode - shift clips when deleting
   const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
@@ -76,6 +78,8 @@ export default function Home() {
     updateTabAsset,
     // Settings
     setSettings,
+    getSystemSettings,
+    saveSystemSettings,
   } = useProject();
 
   // Compute the active clips based on which tab is selected
@@ -1678,6 +1682,13 @@ export default function Home() {
           <button className="px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 rounded-lg text-sm font-medium transition-all">
             AI Edit
           </button>
+          <button
+            onClick={() => setShowSettings(true)}
+            className="p-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors text-zinc-400 hover:text-white"
+            title="Settings"
+          >
+            <Settings className="w-5 h-5" />
+          </button>
         </div>
       </header>
 
@@ -1991,6 +2002,15 @@ export default function Home() {
           sessionId={session.sessionId}
           onClose={() => setShowGifSearch(false)}
           onGifAdded={handleGifAdded}
+        />
+      )}
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          onSave={saveSystemSettings}
+          initialSettingsPromise={getSystemSettings()}
         />
       )}
     </div>
