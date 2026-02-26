@@ -22,6 +22,12 @@ jobs:
       - name: Install Dependencies
         run: npm install --legacy-peer-deps
 
+      - name: Set Nightly Version
+        shell: bash
+        run: |
+          npm version 0.0.0-nightly-$(date +%Y%m%d) --no-git-tag-version
+          echo "Setting version to 0.0.0-nightly-$(date +%Y%m%d)"
+
       - name: Build React App
         run: npm run build
 
