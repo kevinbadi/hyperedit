@@ -8,10 +8,16 @@ import formidable from 'formidable';
 import { GoogleGenAI } from '@google/genai';
 import { fal } from '@fal-ai/client';
 
+// Detect if running in Electron
+const IS_ELECTRON = process.env.ELECTRON_RUN === 'true';
+
+// In Electron/production, resources might be in a different place
+const BASE_DIR = process.env.CWD_OVERRIDE || process.cwd();
+
 // Load environment variables from .dev.vars
 function loadEnvVars() {
   try {
-    const envPath = join(process.cwd(), '.dev.vars');
+    const envPath = join(BASE_DIR, '.dev.vars');
     if (existsSync(envPath)) {
       const content = readFileSync(envPath, 'utf-8');
       for (const line of content.split('\n')) {
@@ -294,7 +300,8 @@ setInterval(() => {
 // Run FFmpeg command and return a promise
 function runFFmpeg(args, jobId) {
   return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', args);
+    const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+    const ffmpeg = spawn(ffmpegPath, args);
     let stderr = '';
 
     ffmpeg.stderr.on('data', (data) => {
@@ -321,7 +328,8 @@ function runFFmpeg(args, jobId) {
 // Run FFprobe command and return stdout
 function runFFmpegProbe(args, jobId) {
   return new Promise((resolve, reject) => {
-    const ffprobe = spawn('ffprobe', args);
+    const ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
+    const ffprobe = spawn(ffprobePath, args);
     let stdout = '';
     let stderr = '';
 
@@ -390,8 +398,9 @@ async function detectSilence(inputPath, jobId, options = {}) {
 // Get video/audio duration (returns 0 for images)
 async function getVideoDuration(inputPath) {
   try {
+    const ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
     const result = execSync(
-      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`,
+      `"${ffprobePath}" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`,
       { encoding: 'utf-8' }
     );
     const duration = parseFloat(result.trim());
@@ -1244,8 +1253,9 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
     console.log(`\n[${jobId}] Dead air removal complete`);
 
     // Verify output has audio before replacing original
+    const ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
     const probeResult = execSync(
-      `ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "${outputPath}"`,
+      `"${ffprobePath}" -v error -show_entries stream=codec_type -of csv=p=0 "${outputPath}"`,
       { encoding: 'utf-8' }
     );
     const streams = probeResult.trim().split('\n');
@@ -1257,7 +1267,7 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
 
     // Also probe the ORIGINAL file for comparison
     const origProbe = execSync(
-      `ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "${videoAsset.path}"`,
+      `"${ffprobePath}" -v error -show_entries stream=codec_type -of csv=p=0 "${videoAsset.path}"`,
       { encoding: 'utf-8' }
     );
     console.log(`🔍 [${jobId}]   Original streams: ${origProbe.trim().split('\n').join(', ')}`);
@@ -1535,8 +1545,9 @@ async function generateThumbnail(inputPath, outputPath, isImage = false) {
 // Get video/image dimensions
 async function getMediaInfo(inputPath) {
   try {
+    const ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
     const result = execSync(
-      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration -of json "${inputPath}"`,
+      `"${ffprobePath}" -v error -select_streams v:0 -show_entries stream=width,height,duration -of json "${inputPath}"`,
       { encoding: 'utf-8' }
     );
     const info = JSON.parse(result);
@@ -2671,7 +2682,7 @@ async function checkLocalWhisper() {
 
 // Run local Whisper transcription
 async function runLocalWhisper(audioPath, jobId) {
-  const scriptPath = join(process.cwd(), 'scripts', 'whisper-transcribe.py');
+  const scriptPath = join(BASE_DIR, 'scripts', 'whisper-transcribe.py');
 
   return new Promise((resolve, reject) => {
     console.log(`[${jobId}] Running local Whisper...`);
@@ -7418,8 +7429,9 @@ async function handleExtractAudio(req, res, sessionId) {
     // Get audio duration
     let audioDuration = videoAsset.duration;
     try {
+      const ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
       const durationStr = execSync(
-        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`,
+        `"${ffprobePath}" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`,
         { encoding: 'utf-8' }
       ).trim();
       audioDuration = parseFloat(durationStr) || videoAsset.duration;
@@ -7576,8 +7588,9 @@ async function handleProcessAsset(req, res, sessionId) {
     // Get duration with ffprobe
     let duration = asset.duration;
     try {
+      const ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
       const durationStr = execSync(
-        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${outputPath}"`,
+        `"${ffprobePath}" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${outputPath}"`,
         { encoding: 'utf-8' }
       ).trim();
       duration = parseFloat(durationStr) || asset.duration;
@@ -7663,7 +7676,7 @@ async function handleSettingsSave(req, res) {
     }
 
     // Persist to .dev.vars
-    const envPath = join(process.cwd(), '.dev.vars');
+    const envPath = join(BASE_DIR, '.dev.vars');
     let envContent = '';
 
     if (existsSync(envPath)) {

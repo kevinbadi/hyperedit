@@ -1,0 +1,43 @@
+name: Nightly Build
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Set Nightly Version
+        shell: bash
+        run: |
+          npm version 0.0.0-nightly-$(date +%Y%m%d) --no-git-tag-version
+          echo "Setting version to 0.0.0-nightly-$(date +%Y%m%d)"
+
+      - name: Build React App
+        run: npm run build
+
+      - name: Build Electron App
+        run: npm run electron:build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HyperEdit-Nightly-Windows
+          path: dist_electron/*.exe
