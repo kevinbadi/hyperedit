@@ -1648,10 +1648,10 @@ export default function Home() {
       <header className="flex items-center justify-between px-6 py-3 bg-zinc-900/50 border-b border-zinc-800/50 backdrop-blur-sm">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg flex items-center justify-center">
+            <div className="w-8 h-8 bg-gradient-to-br from-zinc-500 to-zinc-500 rounded-lg flex items-center justify-center">
               <Sparkles className="w-5 h-5" />
             </div>
-            <h1 className="text-xl font-bold bg-gradient-to-r from-orange-400 to-amber-400 bg-clip-text text-transparent">
+            <h1 className="text-xl font-bold bg-gradient-to-r from-zinc-400 to-zinc-400 bg-clip-text text-transparent">
               HyperEdit
             </h1>
           </div>
@@ -1684,7 +1684,7 @@ export default function Home() {
               )}
             </>
           )}
-          <button className="px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 rounded-lg text-sm font-medium transition-all">
+          <button className="px-4 py-2 bg-gradient-to-r from-zinc-500 to-zinc-500 hover:from-zinc-600 hover:to-zinc-600 rounded-lg text-sm font-medium transition-all">
             AI Edit
           </button>
         </div>
@@ -1711,7 +1711,7 @@ export default function Home() {
           <div className="bg-zinc-900 rounded-xl border border-zinc-700 max-w-lg w-full max-h-[80vh] overflow-hidden flex flex-col">
             <div className="flex items-center justify-between p-4 border-b border-zinc-700">
               <h2 className="text-lg font-semibold flex items-center gap-2">
-                <ListOrdered className="w-5 h-5 text-orange-400" />
+                <ListOrdered className="w-5 h-5 text-zinc-400" />
                 YouTube Chapters
               </h2>
               <button
@@ -1753,7 +1753,7 @@ export default function Home() {
             <div className="p-4 border-t border-zinc-700 flex gap-2">
               <button
                 onClick={handleCopyChapters}
-                className="flex-1 px-4 py-2 bg-orange-600 hover:bg-orange-500 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                className="flex-1 px-4 py-2 bg-zinc-600 hover:bg-zinc-500 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
               >
                 {copied ? (
                   <>
@@ -1825,8 +1825,14 @@ export default function Home() {
 
         {/* Main Editor Area */}
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-          {/* Video Preview */}
-          <div className="flex-1 flex items-center justify-center bg-zinc-900/30 p-4 min-h-0 overflow-hidden">
+          {/* Video Preview — resizable like the timeline */}
+          <ResizableVerticalPanel
+            defaultHeight={Math.round(window.innerHeight * 0.55)}
+            minHeight={220}
+            maxHeight={Math.round(window.innerHeight * 0.85)}
+            position="top"
+            className="flex items-center justify-center bg-zinc-900/30 p-4 overflow-hidden"
+          >
             {hasPreviewContent ? (
               <VideoPreview
                 ref={videoPreviewRef}
@@ -1839,7 +1845,7 @@ export default function Home() {
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip
-              <div className={`relative ${aspectRatio === '9:16' ? 'h-[65vh] w-auto aspect-[9/16]' : 'w-full max-w-4xl aspect-video'} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
+              <div className={`relative ${aspectRatio === '9:16' ? 'h-full max-h-full w-auto aspect-[9/16]' : 'h-full max-h-full w-auto aspect-video'} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
                 <div className="text-center text-zinc-600">
                   <div className="text-sm">No clip at playhead</div>
                   <div className="text-xs mt-1">Move playhead over a clip to preview</div>
@@ -1852,7 +1858,11 @@ export default function Home() {
                 <p className="text-xs text-zinc-600 mt-1">Drag them to the timeline below</p>
               </div>
             )}
-          </div>
+          </ResizableVerticalPanel>
+
+          {/* Spacer that absorbs any leftover vertical room between the
+              resizable preview and the resizable timeline */}
+          <div className="flex-1 min-h-0 bg-zinc-900/30" />
 
           {/* Timeline - Resizable height */}
           <ResizableVerticalPanel
@@ -1898,40 +1908,18 @@ export default function Home() {
           side="right"
         >
           <div className="h-full flex flex-col bg-zinc-900/80 backdrop-blur-sm">
-            {/* Agent Tabs */}
+            {/* Agent Tabs — order: Director, Obsidian, DiCaprio, Picasso */}
             <div className="flex items-center gap-1 px-2 border-b border-zinc-800/50">
               <button
                 onClick={() => setActiveAgent('director')}
                 className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
                   activeAgent === 'director'
-                    ? 'text-orange-500 border-b-2 border-orange-500 bg-zinc-800/30'
+                    ? 'text-zinc-200 border-b-2 border-zinc-300 bg-zinc-800/30'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
                 }`}
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 Director
-              </button>
-              <button
-                onClick={() => setActiveAgent('picasso')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
-                  activeAgent === 'picasso'
-                    ? 'text-orange-300 border-b-2 border-orange-300 bg-zinc-800/30'
-                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                }`}
-              >
-                <Palette className="w-3.5 h-3.5" />
-                Picasso
-              </button>
-              <button
-                onClick={() => setActiveAgent('dicaprio')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
-                  activeAgent === 'dicaprio'
-                    ? 'text-zinc-300 border-b-2 border-zinc-300 bg-zinc-800/30'
-                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                }`}
-              >
-                <Film className="w-3.5 h-3.5" />
-                DiCaprio
               </button>
               <button
                 onClick={() => setActiveAgent('obsidian')}
@@ -1943,6 +1931,28 @@ export default function Home() {
               >
                 <Database className="w-3.5 h-3.5" />
                 Obsidian
+              </button>
+              <button
+                onClick={() => setActiveAgent('dicaprio')}
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
+                  activeAgent === 'dicaprio'
+                    ? 'text-zinc-200 border-b-2 border-zinc-300 bg-zinc-800/30'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
+                }`}
+              >
+                <Film className="w-3.5 h-3.5" />
+                DiCaprio
+              </button>
+              <button
+                onClick={() => setActiveAgent('picasso')}
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
+                  activeAgent === 'picasso'
+                    ? 'text-zinc-200 border-b-2 border-zinc-300 bg-zinc-800/30'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
+                }`}
+              >
+                <Palette className="w-3.5 h-3.5" />
+                Picasso
               </button>
             </div>
 

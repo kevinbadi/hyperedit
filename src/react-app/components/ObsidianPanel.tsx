@@ -86,7 +86,7 @@ export default function ObsidianPanel({
           type: 'assistant',
           text:
             results.length === 0
-              ? "I couldn't find anything in the CPI vault that matches. Try different keywords."
+              ? "I couldn't find anything in your vault that matches. Try different keywords."
               : `Found ${results.length} match${results.length === 1 ? '' : 'es'}. Click Import to pull any of these into your editor.`,
           results,
         },
@@ -158,7 +158,7 @@ export default function ObsidianPanel({
           <h2 className="font-semibold bg-gradient-to-r from-zinc-200 to-zinc-400 bg-clip-text text-transparent">Obsidian</h2>
         </div>
         <p className="text-xs text-zinc-400">
-          Search the CPI knowledge vault and import videos from Dropbox
+          Connect your video knowledge vault to source clips from Dropbox & Google Drive
         </p>
       </div>
 
@@ -177,9 +177,9 @@ export default function ObsidianPanel({
         {messages.length === 0 ? (
           <div className="text-center text-sm text-zinc-500 py-8 px-4">
             <Database className="w-8 h-8 mx-auto mb-3 text-zinc-600" />
-            <p className="mb-1">Ask Obsidian to find videos.</p>
+            <p className="mb-1">Search your video knowledge vault.</p>
             <p className="text-xs text-zinc-600">
-              Try: "MRI scans of knees", "red light therapy facial", "shoulder treatment b-roll"
+              Describe what you're looking for — by topic, person, location, or any tag in your notes.
             </p>
           </div>
         ) : (
@@ -306,7 +306,7 @@ export default function ObsidianPanel({
             type="text"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Find videos in the CPI vault..."
+            placeholder="Search your video knowledge vault..."
             disabled={isSearching}
             className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-[#39FF14]/40 focus:border-[#39FF14]/50 disabled:opacity-50"
           />

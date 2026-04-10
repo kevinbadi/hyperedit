@@ -105,7 +105,7 @@ export default function ClipPropertiesPanel({
               step="0.05"
               value={transform.scale ?? 1}
               onChange={(e) => handleScaleChange(parseFloat(e.target.value))}
-              className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
+              className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-zinc-500"
             />
             <span className="text-xs text-zinc-400 w-12 text-right">
               {((transform.scale ?? 1) * 100).toFixed(0)}%
@@ -127,7 +127,7 @@ export default function ClipPropertiesPanel({
               step="1"
               value={transform.rotation ?? 0}
               onChange={(e) => handleRotationChange(parseFloat(e.target.value))}
-              className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
+              className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-zinc-500"
             />
             <span className="text-xs text-zinc-400 w-12 text-right">
               {(transform.rotation ?? 0).toFixed(0)}°

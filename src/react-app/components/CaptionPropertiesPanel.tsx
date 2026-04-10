@@ -97,7 +97,7 @@ export default function CaptionPropertiesPanel({
       {/* Caption preview */}
       <div className="px-3 py-2 border-b border-zinc-800/50">
         <div className="flex items-center gap-2 text-xs text-white font-medium">
-          <Type className="w-3.5 h-3.5 text-purple-400" />
+          <Type className="w-3.5 h-3.5 text-zinc-400" />
           <span className="truncate">{textPreview || 'Caption'}</span>
         </div>
         <div className="text-[10px] text-zinc-500 mt-0.5">
@@ -137,7 +137,7 @@ export default function CaptionPropertiesPanel({
             step="2"
             value={style.fontSize}
             onChange={(e) => handleFontSizeChange(parseInt(e.target.value))}
-            className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+            className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-zinc-500"
           />
         </div>
 
@@ -151,7 +151,7 @@ export default function CaptionPropertiesPanel({
                 onClick={() => handleFontWeightChange(weight)}
                 className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
                   style.fontWeight === weight
-                    ? 'bg-purple-500 text-white'
+                    ? 'bg-zinc-500 text-white'
                     : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
                 }`}
               >
@@ -202,7 +202,7 @@ export default function CaptionPropertiesPanel({
             step="1"
             value={style.strokeWidth || 0}
             onChange={(e) => handleStrokeWidthChange(parseInt(e.target.value))}
-            className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+            className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-zinc-500"
           />
         </div>
 
@@ -219,7 +219,7 @@ export default function CaptionPropertiesPanel({
                 onClick={() => handlePositionChange(opt.value as 'top' | 'center' | 'bottom')}
                 className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
                   style.position === opt.value
-                    ? 'bg-purple-500 text-white'
+                    ? 'bg-zinc-500 text-white'
                     : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
                 }`}
               >
@@ -269,7 +269,7 @@ export default function CaptionPropertiesPanel({
             step="0.1"
             value={style.timeOffset || 0}
             onChange={(e) => onUpdateStyle({ timeOffset: parseFloat(e.target.value) })}
-            className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+            className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-zinc-500"
           />
           <div className="flex justify-between text-[10px] text-zinc-500 mt-1">
             <span>Earlier</span>

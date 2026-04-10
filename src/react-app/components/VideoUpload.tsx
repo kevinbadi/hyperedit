@@ -36,7 +36,7 @@ export default function VideoUpload({ onVideoSelect }: VideoUploadProps) {
       onClick={handleClick}
       onDrop={handleDrop}
       onDragOver={handleDragOver}
-      className="relative w-full max-w-4xl aspect-video bg-gradient-to-br from-zinc-900 to-zinc-950 rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 cursor-pointer group hover:ring-purple-500/50 transition-all"
+      className="relative w-full max-w-4xl aspect-video bg-gradient-to-br from-zinc-900 to-zinc-950 rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 cursor-pointer group hover:ring-zinc-500/50 transition-all"
     >
       <input
         ref={fileInputRef}
@@ -49,13 +49,13 @@ export default function VideoUpload({ onVideoSelect }: VideoUploadProps) {
       <div className="absolute inset-0 flex flex-col items-center justify-center p-8 group-hover:bg-white/5 transition-colors">
         <div className="relative mb-6">
           {/* Animated circles */}
-          <div className="absolute inset-0 bg-gradient-to-br from-purple-500/20 to-pink-500/20 rounded-full animate-pulse" />
-          <div className="relative w-24 h-24 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center group-hover:scale-110 transition-transform">
+          <div className="absolute inset-0 bg-gradient-to-br from-zinc-500/20 to-zinc-500/20 rounded-full animate-pulse" />
+          <div className="relative w-24 h-24 bg-gradient-to-br from-zinc-500 to-zinc-500 rounded-full flex items-center justify-center group-hover:scale-110 transition-transform">
             <Upload className="w-12 h-12 text-white" />
           </div>
         </div>
 
-        <h3 className="text-xl font-semibold mb-2 bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+        <h3 className="text-xl font-semibold mb-2 bg-gradient-to-r from-zinc-400 to-zinc-400 bg-clip-text text-transparent">
           Upload Your Video
         </h3>
         <p className="text-zinc-400 text-sm mb-6 text-center max-w-md">
@@ -77,7 +77,7 @@ export default function VideoUpload({ onVideoSelect }: VideoUploadProps) {
 
       {/* Glow effect on hover */}
       <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-        <div className="absolute inset-0 bg-gradient-to-r from-purple-500/10 to-pink-500/10" />
+        <div className="absolute inset-0 bg-gradient-to-r from-zinc-500/10 to-zinc-500/10" />
       </div>
     </div>
   );

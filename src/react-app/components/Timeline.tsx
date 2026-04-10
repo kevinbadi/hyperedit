@@ -237,10 +237,10 @@ export default function Timeline({
             </button>
             <button
               onClick={onPlayPause}
-              className={`p-1.5 rounded transition-colors ${
+              className={`p-1.5 rounded transition-all ${
                 isPlaying
-                  ? 'bg-orange-500 hover:bg-orange-600 text-white'
-                  : 'bg-zinc-700 hover:bg-zinc-600'
+                  ? 'bg-[#39FF14]/20 text-[#39FF14] ring-1 ring-[#39FF14]/60 shadow-[0_0_8px_rgba(57,255,20,0.4)]'
+                  : 'bg-zinc-700 hover:bg-zinc-600 hover:text-[#39FF14]'
               }`}
               title={isPlaying ? 'Pause' : 'Play'}
             >
@@ -290,9 +290,9 @@ export default function Timeline({
             <div className="w-px h-4 bg-zinc-600" />
             <button
               onClick={onToggleAutoSnap}
-              className={`p-1.5 rounded transition-colors ${
+              className={`p-1.5 rounded transition-all ${
                 autoSnap
-                  ? 'bg-orange-500/20 text-orange-400 hover:bg-orange-500/30'
+                  ? 'bg-[#39FF14]/15 text-[#39FF14] ring-1 ring-[#39FF14]/40'
                   : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-400'
               }`}
               title={autoSnap ? 'Auto-snap ON: Clips shift when deleting' : 'Auto-snap OFF: Gaps remain when deleting'}
@@ -307,7 +307,7 @@ export default function Timeline({
 
           {/* Time display */}
           <div className="flex items-center gap-2 text-xs">
-            <span className="font-mono text-orange-400">{formatTime(currentTime)}</span>
+            <span className="font-mono text-zinc-400">{formatTime(currentTime)}</span>
             <span className="text-zinc-600">/</span>
             <span className="font-mono text-zinc-400">{formatTime(duration)}</span>
           </div>
@@ -383,7 +383,7 @@ export default function Timeline({
         {/* Scrollable tracks area */}
         <div
           ref={tracksContainerRef}
-          className="flex-1 overflow-auto"
+          className="flex-1 overflow-auto timeline-scroll"
           onMouseMove={handleMouseMove}
         >
           <div
@@ -421,7 +421,7 @@ export default function Timeline({
                   <div
                     key={track.id}
                     className={`relative border-b border-zinc-800/50 ${
-                      isDragOver ? 'bg-orange-500/10' : 'bg-zinc-900/30'
+                      isDragOver ? 'bg-zinc-500/10' : 'bg-zinc-900/30'
                     }`}
                     style={{ height: TRACK_HEIGHTS[track.type] }}
                     onDragOver={(e) => handleDragOver(e, track.id)}
@@ -450,7 +450,7 @@ export default function Timeline({
 
                     {/* Drop indicator */}
                     {isDragOver && (
-                      <div className="absolute inset-0 flex items-center justify-center text-xs text-orange-400 pointer-events-none border-2 border-dashed border-orange-500/50 rounded">
+                      <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-400 pointer-events-none border-2 border-dashed border-zinc-500/50 rounded">
                         Drop to add clip
                       </div>
                     )}
@@ -489,9 +489,9 @@ export default function Timeline({
               })}
             </div>
 
-            {/* Playhead */}
+            {/* Playhead — neon green so it pops against silver clips */}
             <div
-              className="absolute top-0 bottom-0 w-0.5 bg-orange-500 z-40 pointer-events-none"
+              className="absolute top-0 bottom-0 w-0.5 bg-[#39FF14] shadow-[0_0_8px_rgba(57,255,20,0.8)] z-40 pointer-events-none"
               style={{ left: `${currentTime * pixelsPerSecond}px` }}
             >
               {/* Playhead handle */}
@@ -499,7 +499,7 @@ export default function Timeline({
                 className="absolute -top-0 -left-2.5 w-5 h-5 cursor-ew-resize pointer-events-auto"
                 onMouseDown={handlePlayheadMouseDown}
               >
-                <div className="absolute top-0 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent border-t-orange-500" />
+                <div className="absolute top-0 left-1/2 -translate-x-1/2 w-0 h-0 border-l-[6px] border-r-[6px] border-t-[8px] border-l-transparent border-r-transparent border-t-[#39FF14] drop-shadow-[0_0_4px_rgba(57,255,20,0.8)]" />
               </div>
             </div>
           </div>

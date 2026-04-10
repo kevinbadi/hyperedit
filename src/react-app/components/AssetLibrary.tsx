@@ -24,9 +24,9 @@ const getAssetIcon = (type: Asset['type']) => {
 
 const getAssetColor = (type: Asset['type']) => {
   switch (type) {
-    case 'video': return 'from-blue-500 to-cyan-500';
-    case 'image': return 'from-amber-500 to-orange-500';
-    case 'audio': return 'from-emerald-500 to-teal-500';
+    case 'video': return 'from-zinc-500 to-zinc-500';
+    case 'image': return 'from-zinc-500 to-zinc-500';
+    case 'audio': return 'from-zinc-500 to-zinc-500';
     default: return 'from-gray-500 to-gray-600';
   }
 };
@@ -95,7 +95,7 @@ export default function AssetLibrary({
           {onOpenGifSearch && (
             <button
               onClick={onOpenGifSearch}
-              className="p-1.5 bg-purple-600 hover:bg-purple-500 rounded text-xs transition-colors"
+              className="p-1.5 bg-zinc-600 hover:bg-zinc-500 rounded text-xs transition-colors"
               title="Search GIFs & Memes"
             >
               <ImageIcon className="w-3.5 h-3.5" />
@@ -104,7 +104,7 @@ export default function AssetLibrary({
           <button
             onClick={handleFileSelect}
             disabled={uploading}
-            className="p-1.5 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs transition-colors"
+            className="p-1.5 bg-zinc-600 hover:bg-zinc-500 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs transition-colors"
             title="Import files"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -131,7 +131,7 @@ export default function AssetLibrary({
         {assets.length === 0 ? (
           <div
             onClick={handleFileSelect}
-            className="flex flex-col items-center justify-center h-full p-4 border-2 border-dashed border-zinc-700 rounded-lg cursor-pointer hover:border-orange-500/50 hover:bg-orange-500/5 transition-colors"
+            className="flex flex-col items-center justify-center h-full p-4 border-2 border-dashed border-zinc-700 rounded-lg cursor-pointer hover:border-zinc-500/50 hover:bg-zinc-500/5 transition-colors"
           >
             <Upload className="w-8 h-8 text-zinc-500 mb-2" />
             <span className="text-xs text-zinc-500 text-center">
@@ -155,7 +155,7 @@ export default function AssetLibrary({
             <button
               onClick={handleFileSelect}
               disabled={uploading}
-              className="aspect-video flex flex-col items-center justify-center border-2 border-dashed border-zinc-700 rounded-lg cursor-pointer hover:border-orange-500/50 hover:bg-orange-500/5 transition-colors"
+              className="aspect-video flex flex-col items-center justify-center border-2 border-dashed border-zinc-700 rounded-lg cursor-pointer hover:border-zinc-500/50 hover:bg-zinc-500/5 transition-colors"
             >
               <Plus className="w-6 h-6 text-zinc-500" />
               <span className="text-[10px] text-zinc-500 mt-1">Add</span>
@@ -165,7 +165,7 @@ export default function AssetLibrary({
 
         {uploading && (
           <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-            <div className="animate-spin w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full" />
+            <div className="animate-spin w-6 h-6 border-2 border-zinc-500 border-t-transparent rounded-full" />
           </div>
         )}
       </div>
@@ -204,8 +204,8 @@ function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart }: Asset
       onClick={handleClick}
       className={`group relative aspect-video bg-zinc-800 rounded-lg overflow-hidden cursor-grab active:cursor-grabbing border transition-colors ${
         isSelected
-          ? 'border-orange-500 ring-2 ring-orange-500/30'
-          : 'border-zinc-700/50 hover:border-orange-500/50'
+          ? 'border-zinc-500 ring-2 ring-zinc-500/30'
+          : 'border-zinc-700/50 hover:border-zinc-500/50'
       }`}
     >
       {/* Thumbnail */}
@@ -230,7 +230,7 @@ function AssetCard({ asset, isSelected, onSelect, onDelete, onDragStart }: Asset
       {/* AI-generated badge */}
       {asset.aiGenerated && (
         <div
-          className="absolute top-1 left-[52px] px-1.5 py-0.5 rounded bg-gradient-to-r from-purple-500 to-pink-500 text-[9px] font-medium flex items-center gap-0.5"
+          className="absolute top-1 left-[52px] px-1.5 py-0.5 rounded bg-gradient-to-r from-zinc-500 to-zinc-500 text-[9px] font-medium flex items-center gap-0.5"
           title="AI-generated Remotion animation"
         >
           <Sparkles className="w-2.5 h-2.5" />

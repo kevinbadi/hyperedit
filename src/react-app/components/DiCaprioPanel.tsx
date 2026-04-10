@@ -699,7 +699,7 @@ export default function DiCaprioPanel({
                               <div className="text-sm text-zinc-200 truncate font-medium">{getFriendlyName(asset)}</div>
                               <div className="flex items-center gap-1.5 mt-0.5">
                                 <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                                  asset.type === 'video' ? 'bg-blue-500/20 text-blue-300' : 'bg-purple-500/20 text-purple-300'
+                                  asset.type === 'video' ? 'bg-zinc-500/20 text-zinc-300' : 'bg-zinc-500/20 text-zinc-300'
                                 }`}>
                                   {asset.type}
                                 </span>

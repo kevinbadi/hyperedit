@@ -198,7 +198,7 @@ export default function PicassoPanel({
       {/* Header */}
       <div className="p-4 border-b border-zinc-800/50">
         <div className="flex items-center gap-2 mb-2">
-          <div className="w-8 h-8 bg-gradient-to-br from-orange-400 to-amber-300 rounded-lg flex items-center justify-center">
+          <div className="w-8 h-8 bg-gradient-to-br from-zinc-400 to-zinc-300 rounded-lg flex items-center justify-center">
             <Palette className="w-4 h-4" />
           </div>
           <h2 className="font-semibold">Picasso</h2>
@@ -210,11 +210,11 @@ export default function PicassoPanel({
 
       {/* Processing overlay */}
       {isGenerating && (
-        <div className="p-4 bg-orange-400/10 border-b border-orange-400/20">
+        <div className="p-4 bg-zinc-400/10 border-b border-zinc-400/20">
           <div className="flex items-center gap-3">
-            <Loader2 className="w-5 h-5 text-orange-300 animate-spin" />
+            <Loader2 className="w-5 h-5 text-zinc-300 animate-spin" />
             <div className="flex-1">
-              <p className="text-sm text-orange-200 font-medium">
+              <p className="text-sm text-zinc-200 font-medium">
                 Generating image...
               </p>
             </div>
@@ -235,7 +235,7 @@ export default function PicassoPanel({
             <div key={idx} className="space-y-2">
               {message.type === 'user' ? (
                 <div className="flex justify-end">
-                  <div className="bg-gradient-to-r from-orange-400 to-amber-300 rounded-lg px-3 py-2 max-w-[85%]">
+                  <div className="bg-gradient-to-r from-zinc-400 to-zinc-300 rounded-lg px-3 py-2 max-w-[85%]">
                     <p className="text-sm text-white">{message.text}</p>
                   </div>
                 </div>
@@ -252,7 +252,7 @@ export default function PicassoPanel({
                           disabled={isGenerating}
                           className="flex-1 flex flex-col items-center gap-1 px-3 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 rounded-lg transition-colors"
                         >
-                          <div className="w-8 h-5 border-2 border-orange-300 rounded" />
+                          <div className="w-8 h-5 border-2 border-zinc-300 rounded" />
                           <span className="text-xs text-zinc-300">Horizontal</span>
                         </button>
                         <button
@@ -260,7 +260,7 @@ export default function PicassoPanel({
                           disabled={isGenerating}
                           className="flex-1 flex flex-col items-center gap-1 px-3 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 rounded-lg transition-colors"
                         >
-                          <div className="w-5 h-8 border-2 border-orange-300 rounded" />
+                          <div className="w-5 h-8 border-2 border-zinc-300 rounded" />
                           <span className="text-xs text-zinc-300">Vertical</span>
                         </button>
                         <button
@@ -268,7 +268,7 @@ export default function PicassoPanel({
                           disabled={isGenerating}
                           className="flex-1 flex flex-col items-center gap-1 px-3 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 rounded-lg transition-colors"
                         >
-                          <div className="w-6 h-6 border-2 border-orange-300 rounded" />
+                          <div className="w-6 h-6 border-2 border-zinc-300 rounded" />
                           <span className="text-xs text-zinc-300">Square</span>
                         </button>
                       </div>
@@ -317,7 +317,7 @@ export default function PicassoPanel({
             disabled={!sessionId || isGenerating}
             className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
               showQuickActions
-                ? 'bg-orange-400/20 text-orange-300 ring-1 ring-orange-400/50'
+                ? 'bg-zinc-400/20 text-zinc-300 ring-1 ring-zinc-400/50'
                 : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-50 disabled:cursor-not-allowed'
             }`}
           >
@@ -340,7 +340,7 @@ export default function PicassoPanel({
                     }}
                     className="flex items-center gap-2 px-3 py-2.5 bg-zinc-700/50 hover:bg-zinc-700 rounded-lg text-xs text-left transition-colors group"
                   >
-                    <action.icon className="w-4 h-4 text-zinc-400 group-hover:text-orange-300 transition-colors flex-shrink-0" />
+                    <action.icon className="w-4 h-4 text-zinc-400 group-hover:text-zinc-300 transition-colors flex-shrink-0" />
                     <span className="text-zinc-300 leading-tight">{action.text}</span>
                   </button>
                 ))}
@@ -350,7 +350,7 @@ export default function PicassoPanel({
         </div>
 
         {/* Unified Input Container */}
-        <div className="bg-zinc-800 rounded-xl border border-zinc-700/50 focus-within:ring-2 focus-within:ring-orange-400/50 transition-all">
+        <div className="bg-zinc-800 rounded-xl border border-zinc-700/50 focus-within:ring-2 focus-within:ring-zinc-400/50 transition-all">
           {/* Textarea */}
           <textarea
             value={prompt}
@@ -378,7 +378,7 @@ export default function PicassoPanel({
             <button
               type="submit"
               disabled={!prompt.trim() || isGenerating || !sessionId}
-              className="w-8 h-8 bg-gradient-to-r from-orange-400 to-amber-300 disabled:from-zinc-700 disabled:to-zinc-700 rounded-lg flex items-center justify-center transition-all hover:shadow-lg hover:shadow-orange-400/50 disabled:shadow-none"
+              className="w-8 h-8 bg-gradient-to-r from-zinc-400 to-zinc-300 disabled:from-zinc-700 disabled:to-zinc-700 rounded-lg flex items-center justify-center transition-all hover:shadow-lg hover:shadow-zinc-400/50 disabled:shadow-none"
             >
               {isGenerating ? (
                 <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />

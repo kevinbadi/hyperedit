@@ -68,9 +68,9 @@ export default function ResizablePanel({
 
       {/* Resize handle */}
       <div
-        className={`absolute top-0 bottom-0 w-1 cursor-ew-resize hover:bg-orange-500/50 transition-colors z-50 ${
+        className={`absolute top-0 bottom-0 w-1 cursor-ew-resize hover:bg-zinc-500/50 transition-colors z-50 ${
           side === 'left' ? 'right-0' : 'left-0'
-        } ${isResizing ? 'bg-orange-500' : 'bg-transparent'}`}
+        } ${isResizing ? 'bg-zinc-500' : 'bg-transparent'}`}
         onMouseDown={handleMouseDown}
       >
         {/* Visual indicator on hover */}

@@ -36,7 +36,7 @@ export default function TimelineTabs({
             className={`
               group flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all
               ${isActive
-                ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30'
+                ? 'bg-zinc-500/20 text-zinc-400 border border-zinc-500/30'
                 : 'bg-zinc-800/50 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/50 border border-transparent'
               }
             `}
@@ -58,7 +58,7 @@ export default function TimelineTabs({
                 className={`
                   ml-1 p-0.5 rounded transition-colors
                   ${isActive
-                    ? 'hover:bg-orange-500/30 text-orange-300'
+                    ? 'hover:bg-zinc-500/30 text-zinc-300'
                     : 'opacity-0 group-hover:opacity-100 hover:bg-zinc-600 text-zinc-400'
                   }
                 `}

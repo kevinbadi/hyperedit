@@ -29,10 +29,10 @@ const getAssetIcon = (type?: Asset['type'] | 'caption') => {
 
 const getClipColor = (type?: Asset['type'] | 'caption') => {
   switch (type) {
-    case 'video': return 'from-blue-500 to-cyan-500';
-    case 'image': return 'from-amber-500 to-orange-500';
-    case 'audio': return 'from-emerald-500 to-teal-500';
-    case 'caption': return 'from-purple-500 to-pink-500';
+    case 'video': return 'from-zinc-400 to-zinc-600';
+    case 'image': return 'from-zinc-500 to-zinc-500';
+    case 'audio': return 'from-zinc-500 to-zinc-700';
+    case 'caption': return 'from-zinc-300 to-zinc-500';
     default: return 'from-gray-500 to-gray-600';
   }
 };
@@ -170,12 +170,12 @@ export default function TimelineClip({
       onMouseDown={handleMouseDown}
       className={`absolute rounded-md bg-gradient-to-r ${colorClass} ${
         isDragging
-          ? 'opacity-80 scale-105 shadow-xl shadow-black/50 z-30 cursor-grabbing ring-2 ring-orange-400'
+          ? 'opacity-80 scale-105 shadow-xl shadow-black/50 z-30 cursor-grabbing ring-2 ring-[#39FF14]'
           : isResizingLeft || isResizingRight
-            ? 'cursor-ew-resize z-20 ring-2 ring-orange-400'
+            ? 'cursor-ew-resize z-20 ring-2 ring-[#39FF14]'
             : isSelected
-              ? 'ring-2 ring-orange-400 shadow-lg shadow-orange-500/30 z-20 cursor-grab'
-              : 'ring-1 ring-orange-500/50 hover:ring-orange-400 z-10 cursor-grab'
+              ? 'ring-2 ring-[#39FF14] shadow-[0_0_12px_rgba(57,255,20,0.4)] z-20 cursor-grab'
+              : 'ring-1 ring-zinc-500/50 hover:ring-[#39FF14]/70 z-10 cursor-grab'
       } transition-all duration-75`}
       style={{
         left: `${left}px`,
@@ -184,15 +184,15 @@ export default function TimelineClip({
         height: `${trackHeight - 8}px`,
       }}
     >
-      {/* Left edge indicator - prominent orange line showing cut point */}
-      <div className="absolute left-0 top-0 bottom-0 w-1 bg-orange-500 rounded-l-md shadow-[0_0_4px_rgba(249,115,22,0.6)]" />
+      {/* Left edge indicator - neon green line marks cut point */}
+      <div className="absolute left-0 top-0 bottom-0 w-1 bg-[#39FF14] rounded-l-md shadow-[0_0_6px_rgba(57,255,20,0.7)]" />
 
-      {/* Right edge indicator - prominent orange line showing cut point */}
-      <div className="absolute right-0 top-0 bottom-0 w-1 bg-orange-500 rounded-r-md shadow-[0_0_4px_rgba(249,115,22,0.6)]" />
+      {/* Right edge indicator - neon green line marks cut point */}
+      <div className="absolute right-0 top-0 bottom-0 w-1 bg-[#39FF14] rounded-r-md shadow-[0_0_6px_rgba(57,255,20,0.7)]" />
 
       {/* Left resize handle */}
       <div
-        className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-orange-400/30 rounded-l-md z-10"
+        className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-zinc-400/30 rounded-l-md z-10"
         onMouseDown={(e) => {
           e.stopPropagation();
           setIsResizingLeft(true);
@@ -228,7 +228,7 @@ export default function TimelineClip({
         {/* AI-generated indicator */}
         {asset?.aiGenerated && (
           <div
-            className="flex-shrink-0 flex items-center gap-0.5 px-1 py-0.5 bg-purple-500/40 rounded text-[8px] font-bold"
+            className="flex-shrink-0 flex items-center gap-0.5 px-1 py-0.5 bg-zinc-500/40 rounded text-[8px] font-bold"
             title="AI-generated Remotion animation"
           >
             <Sparkles className="w-2.5 h-2.5" />
@@ -239,7 +239,7 @@ export default function TimelineClip({
 
       {/* Right resize handle */}
       <div
-        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-orange-400/30 rounded-r-md z-10"
+        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-zinc-400/30 rounded-r-md z-10"
         onMouseDown={(e) => {
           e.stopPropagation();
           setIsResizingRight(true);

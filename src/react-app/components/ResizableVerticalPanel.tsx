@@ -66,9 +66,9 @@ export default function ResizableVerticalPanel({
     >
       {/* Resize handle */}
       <div
-        className={`absolute left-0 right-0 h-1 cursor-ns-resize hover:bg-orange-500/50 transition-colors z-50 ${
+        className={`absolute left-0 right-0 h-1 cursor-ns-resize hover:bg-zinc-500/50 transition-colors z-50 ${
           position === 'bottom' ? 'top-0' : 'bottom-0'
-        } ${isResizing ? 'bg-orange-500' : 'bg-transparent'}`}
+        } ${isResizing ? 'bg-zinc-500' : 'bg-transparent'}`}
         onMouseDown={handleMouseDown}
       />
 

@@ -134,13 +134,13 @@ export default function GifSearchPanel({ sessionId, onClose, onGifAdded }: GifSe
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search for memes, reactions, GIFs..."
-                className="w-full pl-10 pr-4 py-2.5 bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder-zinc-500 focus:outline-none focus:border-orange-500 transition-colors"
+                className="w-full pl-10 pr-4 py-2.5 bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500 transition-colors"
               />
             </div>
             <button
               type="submit"
               disabled={loading}
-              className="px-4 py-2.5 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
+              className="px-4 py-2.5 bg-zinc-600 hover:bg-zinc-500 disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
             >
               Search
             </button>
@@ -185,7 +185,7 @@ export default function GifSearchPanel({ sessionId, onClose, onGifAdded }: GifSe
                 <div className="text-zinc-400 text-sm">
                   <p className="mb-2">To enable GIF search:</p>
                   <ol className="text-left inline-block">
-                    <li>1. Get a free API key at <a href="https://developers.giphy.com/" target="_blank" rel="noopener" className="text-orange-400 hover:underline">developers.giphy.com</a></li>
+                    <li>1. Get a free API key at <a href="https://developers.giphy.com/" target="_blank" rel="noopener" className="text-zinc-400 hover:underline">developers.giphy.com</a></li>
                     <li>2. Add it to <code className="bg-zinc-800 px-1 rounded">.dev.vars</code>: <code className="bg-zinc-800 px-1 rounded">GIPHY_API_KEY=your_key</code></li>
                     <li>3. Restart the FFmpeg server</li>
                   </ol>
@@ -196,7 +196,7 @@ export default function GifSearchPanel({ sessionId, onClose, onGifAdded }: GifSe
 
           {loading ? (
             <div className="flex items-center justify-center py-12">
-              <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
+              <Loader2 className="w-8 h-8 text-zinc-500 animate-spin" />
             </div>
           ) : (
             <>
@@ -204,7 +204,7 @@ export default function GifSearchPanel({ sessionId, onClose, onGifAdded }: GifSe
               <div className="flex items-center gap-2 mb-4">
                 {mode === 'trending' ? (
                   <>
-                    <TrendingUp className="w-4 h-4 text-orange-500" />
+                    <TrendingUp className="w-4 h-4 text-zinc-500" />
                     <span className="text-sm text-zinc-400">Trending Now</span>
                   </>
                 ) : (
@@ -219,7 +219,7 @@ export default function GifSearchPanel({ sessionId, onClose, onGifAdded }: GifSe
                 {gifs.map((gif) => (
                   <div
                     key={gif.id}
-                    className="group relative aspect-video bg-zinc-800 rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-orange-500 transition-all"
+                    className="group relative aspect-video bg-zinc-800 rounded-lg overflow-hidden cursor-pointer hover:ring-2 hover:ring-zinc-500 transition-all"
                     onClick={() => handleAddGif(gif)}
                   >
                     <img
