@@ -1,12 +1,13 @@
 import http from 'http';
 import { spawn, execSync } from 'child_process';
-import { createWriteStream, createReadStream, unlinkSync, mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, statSync } from 'fs';
+import { createWriteStream, createReadStream, unlinkSync, mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import formidable from 'formidable';
 import { GoogleGenAI } from '@google/genai';
 import { fal } from '@fal-ai/client';
+import { searchVideos as obsidianSearchVideos, getVideoById as obsidianGetVideoById, downloadFromDropbox as obsidianDownloadFromDropbox, getThumbnailPath as obsidianGetThumbnailPath, slugFromSummary as obsidianSlugFromSummary } from './obsidian-agent.js';
 
 // Load environment variables from .dev.vars
 function loadEnvVars() {
@@ -122,10 +123,48 @@ function restoreSessionsFromDisk() {
 
       try {
         const stats = statSync(assetPath);
+
+        // Skip orphan files: zero-byte files (failed uploads) and files
+        // smaller than 1KB. They can't be valid media and would otherwise
+        // appear as ghost assets in the user's library.
+        if (stats.size < 1024) {
+          console.log(`[Session] Skipping orphan/empty asset: ${assetFile.name} (${stats.size} bytes)`);
+          continue;
+        }
+
         const thumbPath = join(assetsDir, `${assetId}_thumb.jpg`);
 
         // Merge with saved metadata if available
         const savedMeta = savedAssetsMeta[assetId] || {};
+
+        // If duration/width/height are missing from metadata (e.g. metadata
+        // save raced with a server restart), probe the file directly with
+        // ffprobe so the asset is restored with accurate dimensions. Without
+        // this, render computes `outPoint = clip.outPoint || asset.duration`
+        // → undefined → `trim=0:NaN` → ffmpeg silently drops the clip from
+        // the export.
+        let duration = savedMeta.duration;
+        let width = savedMeta.width;
+        let height = savedMeta.height;
+        if (type !== 'audio' && (duration === undefined || width === undefined || height === undefined)) {
+          try {
+            const result = execSync(
+              `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration -show_entries format=duration -of default=noprint_wrappers=1:nokey=0 "${assetPath}"`,
+              { encoding: 'utf-8' }
+            );
+            for (const line of result.split('\n')) {
+              const [k, v] = line.split('=');
+              if (k === 'width' && width === undefined) width = parseInt(v) || undefined;
+              if (k === 'height' && height === undefined) height = parseInt(v) || undefined;
+              if (k === 'duration' && duration === undefined) duration = parseFloat(v) || undefined;
+            }
+            if (duration !== undefined) {
+              console.log(`[Session] Re-probed ${assetFile.name}: ${width}x${height}, ${duration.toFixed(2)}s`);
+            }
+          } catch (probeErr) {
+            console.log(`[Session] Could not probe ${assetFile.name}: ${probeErr.message}`);
+          }
+        }
 
         assets.set(assetId, {
           id: assetId,
@@ -141,16 +180,16 @@ function restoreSessionsFromDisk() {
           sceneCount: savedMeta.sceneCount,
           sceneDataPath: savedMeta.sceneDataPath,
           editCount: savedMeta.editCount || 0,
-          duration: savedMeta.duration,
-          width: savedMeta.width,
-          height: savedMeta.height,
+          duration,
+          width,
+          height,
         });
 
         if (savedMeta.aiGenerated) {
           console.log(`[Session] Restored AI-generated asset: ${assetFile.name}`);
         }
       } catch (e) {
-        console.log(`[Session] Could not stat asset ${assetFile.name}`);
+        console.log(`[Session] Could not stat asset ${assetFile.name}: ${e.message}`);
       }
     }
 
@@ -270,7 +309,6 @@ function cleanupSession(sessionId) {
   const session = sessions.get(sessionId);
   if (session) {
     try {
-      const { rmSync } = require('fs');
       rmSync(session.dir, { recursive: true, force: true });
       sessions.delete(sessionId);
       console.log(`[Session] Cleaned up: ${sessionId}`);
@@ -1863,6 +1901,7 @@ function handleProjectGet(req, res, sessionId) {
     tracks: session.project.tracks,
     clips: session.project.clips,
     settings: session.project.settings,
+    timelineTabs: session.project.timelineTabs || [],
   }));
 }
 
@@ -1883,12 +1922,16 @@ async function handleProjectSave(req, res, sessionId) {
     if (data.tracks) session.project.tracks = data.tracks;
     if (data.clips) session.project.clips = data.clips;
     if (data.settings) session.project.settings = { ...session.project.settings, ...data.settings };
+    // Persist edit-tab clips so animations being edited in a tab survive
+    // page reloads. Without this, opening an animation in a tab and then
+    // refreshing the browser nukes the tab and the user's edits.
+    if (data.timelineTabs) session.project.timelineTabs = data.timelineTabs;
 
     // Save to disk for persistence
     const projectPath = join(session.dir, 'project.json');
     writeFileSync(projectPath, JSON.stringify(session.project, null, 2));
 
-    console.log(`[${sessionId}] Project saved: ${session.project.clips.length} clips`);
+    console.log(`[${sessionId}] Project saved: ${session.project.clips.length} clips, ${(session.project.timelineTabs || []).length} edit tab(s)`);
 
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ success: true }));
@@ -1900,6 +1943,120 @@ async function handleProjectSave(req, res, sessionId) {
 }
 
 // Render project to video
+// Quick check whether a media file contains an audio stream. Used by the
+// render pipeline to decide which inputs to mix into the output.
+function hasAudioStream(filePath) {
+  try {
+    const result = execSync(
+      `ffprobe -v error -select_streams a:0 -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 "${filePath}"`,
+      { encoding: 'utf-8' }
+    ).trim();
+    return result === 'audio';
+  } catch {
+    return false;
+  }
+}
+
+// Format a number of seconds as an ASS timestamp: H:MM:SS.cc (centiseconds)
+function formatAssTime(seconds) {
+  const total = Math.max(0, seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = Math.floor(total % 60);
+  const cs = Math.floor((total - Math.floor(total)) * 100);
+  const pad = (n) => n.toString().padStart(2, '0');
+  return `${hours}:${pad(minutes)}:${pad(secs)}.${pad(cs)}`;
+}
+
+// Build an Advanced SubStation Alpha (.ass) file from caption clips on T1.
+// We use .ass instead of SRT because libass uses a virtual 288px coordinate
+// space when reading SRT, which makes Fontsize unpredictable and force_style
+// can't override PlayResY. With a real .ass header (PlayResX/PlayResY) every
+// size below is in actual output pixels.
+//
+// The editor renders captions in CSS pixels on a fixed-height preview pane
+// (`h-[65vh]` ≈ 650px tall). To make the export visually match the editor,
+// we scale fontSize from the preview reference to the output height.
+function buildAssFromCaptions(clips, captions, settings) {
+  const captionClips = clips
+    .filter(c => c.trackId === 'T1')
+    .filter(c => captions && captions[c.id]?.words?.length)
+    .sort((a, b) => a.start - b.start);
+
+  if (captionClips.length === 0) return null;
+
+  // Use the first caption clip's style as the doc-wide default. v1 limitation:
+  // mixing styles per clip would require a Style entry per clip.
+  const styled = captionClips.find(c => captions[c.id]?.style);
+  const style = (styled && captions[styled.id].style) || {};
+
+  // The editor's video preview pane is roughly 650px tall (h-65vh on a
+  // typical desktop). The CaptionRenderer applies fontSize as raw CSS px in
+  // that pane, so a 24px caption visually occupies ~3.7% of the pane height.
+  // We replicate that proportion against the actual output height.
+  const previewRefHeight = 650;
+  const fontPx = Math.max(8, Math.round((style.fontSize || 24) * settings.height / previewRefHeight));
+  const outlineWidth = Math.max(1, Math.round((style.strokeWidth ?? 2) * settings.height / previewRefHeight));
+
+  const fontName = (style.fontFamily || 'Arial').replace(/[,&]/g, '');
+  const primaryColor = libassColor(style.color || '#FFFFFF');
+  const outlineColor = libassColor(style.strokeColor || '#000000');
+  const alignment = captionAlignment(style.position);
+  const marginV = Math.round(settings.height * 0.08); // matches CSS `top/bottom: 8%`
+  const bold = (style.fontWeight === 'bold' || style.fontWeight === 'black') ? -1 : 0;
+
+  const header = [
+    '[Script Info]',
+    'Title: HyperEdit Captions',
+    'ScriptType: v4.00+',
+    `PlayResX: ${settings.width}`,
+    `PlayResY: ${settings.height}`,
+    'WrapStyle: 0',
+    'ScaledBorderAndShadow: yes',
+    '',
+    '[V4+ Styles]',
+    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+    `Style: Default,${fontName},${fontPx},${primaryColor},&H000000FF,${outlineColor},&H00000000,${bold},0,0,0,100,100,0,0,1,${outlineWidth},0,${alignment},20,20,${marginV},1`,
+    '',
+    '[Events]',
+    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+  ];
+
+  const events = [];
+  for (const clip of captionClips) {
+    const data = captions[clip.id];
+    const text = data.words.map(w => w.text).join(' ').trim();
+    if (!text) continue;
+    // Escape ASS special chars: backslash and braces.
+    const escapedText = text.replace(/\\/g, '\\\\').replace(/\{/g, '\\{').replace(/\}/g, '\\}');
+    const start = formatAssTime(clip.start);
+    const end = formatAssTime(clip.start + clip.duration);
+    events.push(`Dialogue: 0,${start},${end},Default,,0,0,0,,${escapedText}`);
+  }
+
+  return events.length > 0 ? [...header, ...events].join('\n') : null;
+}
+
+// Map our CaptionStyle.position to the libass alignment integer:
+//   bottom = 2 (bottom-center), center = 5 (middle-center), top = 8 (top-center)
+function captionAlignment(position) {
+  if (position === 'top') return 8;
+  if (position === 'center') return 5;
+  return 2;
+}
+
+// Convert a CSS hex color (`#RRGGBB`) to libass's `&HAABBGGRR` byte order
+// (alpha=00 = fully opaque). Falls back to white on parse failure.
+function libassColor(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return '&H00FFFFFF';
+  const rgb = m[1];
+  const r = rgb.slice(0, 2);
+  const g = rgb.slice(2, 4);
+  const b = rgb.slice(4, 6);
+  return `&H00${b.toUpperCase()}${g.toUpperCase()}${r.toUpperCase()}`;
+}
+
 async function handleProjectRender(req, res, sessionId) {
   const session = getSession(sessionId);
   if (!session) {
@@ -1913,6 +2070,7 @@ async function handleProjectRender(req, res, sessionId) {
     for await (const chunk of req) body += chunk;
     const options = body ? JSON.parse(body) : {};
     const isPreview = options.preview === true;
+    const captions = options.captions || {};
 
     const clips = session.project.clips;
     const settings = session.project.settings;
@@ -1926,9 +2084,23 @@ async function handleProjectRender(req, res, sessionId) {
     console.log(`\n[${sessionId}] === RENDER ${isPreview ? 'PREVIEW' : 'EXPORT'} ===`);
     console.log(`[${sessionId}] ${clips.length} clips, ${settings.width}x${settings.height}`);
 
-    // Sort clips by track for layering (V1 first, then V2, etc.)
+    // Surface clips that reference unknown assets — these would otherwise
+    // be silently dropped from the export.
+    for (const clip of clips) {
+      if (clip.trackId === 'T1') continue; // T1 = captions, no asset needed
+      if (!clip.assetId) continue;
+      const asset = session.assets.get(clip.assetId);
+      if (!asset) {
+        console.warn(`[${sessionId}] ⚠ Clip ${clip.id.slice(0,8)} on ${clip.trackId} references missing asset ${clip.assetId.slice(0,8)} — DROPPED FROM EXPORT`);
+      } else if (asset.duration === undefined || asset.duration === null) {
+        console.warn(`[${sessionId}] ⚠ Clip ${clip.id.slice(0,8)} on ${clip.trackId} (${asset.filename}) has no duration metadata — may render incorrectly`);
+      }
+    }
+
+    // Sort video clips so V1 (base) is overlaid first, then V2, then V3.
     const videoClips = clips
       .filter(c => session.assets.get(c.assetId)?.type !== 'audio')
+      .filter(c => session.assets.get(c.assetId))
       .sort((a, b) => {
         const trackOrder = { 'V1': 0, 'V2': 1, 'V3': 2 };
         return (trackOrder[a.trackId] || 0) - (trackOrder[b.trackId] || 0);
@@ -1937,89 +2109,130 @@ async function handleProjectRender(req, res, sessionId) {
     const audioClips = clips
       .filter(c => session.assets.get(c.assetId)?.type === 'audio');
 
-    // Calculate total duration from all clips
+    console.log(`[${sessionId}] Will render ${videoClips.length} video clip(s) + ${audioClips.length} audio clip(s)`);
+    for (const c of videoClips) {
+      const a = session.assets.get(c.assetId);
+      console.log(`[${sessionId}]   → ${c.trackId} | ${a.filename} | start=${c.start}s dur=${c.duration}s ai=${a.aiGenerated || false}`);
+    }
+
     const totalDuration = Math.max(
       ...clips.map(c => c.start + c.duration),
       0.1
     );
 
-    // Build FFmpeg filter_complex
+    // Assign a single input index per clip so video and audio filter chains
+    // reference the same inputs. Video clips get loaded first (so V1/V2/V3
+    // inputs are contiguous), then dedicated audio clips.
     const inputs = [];
     const filterParts = [];
     let inputIndex = 0;
+    const clipInputs = []; // [{ clip, asset, inputIdx, kind: 'video' | 'audio' }]
 
-    // Create black background
-    filterParts.push(`color=black:s=${settings.width}x${settings.height}:d=${totalDuration}:r=${settings.fps}[base]`);
-    let lastVideo = 'base';
-
-    // Process video clips
     for (const clip of videoClips) {
       const asset = session.assets.get(clip.assetId);
       if (!asset) continue;
-
       inputs.push('-i', asset.path);
-      const idx = inputIndex++;
+      clipInputs.push({ clip, asset, inputIdx: inputIndex++, kind: 'video' });
+    }
+    for (const clip of audioClips) {
+      const asset = session.assets.get(clip.assetId);
+      if (!asset) continue;
+      inputs.push('-i', asset.path);
+      clipInputs.push({ clip, asset, inputIdx: inputIndex++, kind: 'audio' });
+    }
 
-      // Apply trim and scale
-      const inPoint = clip.inPoint || 0;
-      const outPoint = clip.outPoint || asset.duration;
+    // Base canvas spans the whole timeline so every overlay has something to
+    // composite against, even in the gaps between clips.
+    filterParts.push(`color=black:s=${settings.width}x${settings.height}:d=${totalDuration}:r=${settings.fps}[base]`);
+    let lastVideo = 'base';
+
+    // Build the video overlay chain. CRITICAL: each clip's PTS is shifted to
+    // `clip.start` (`setpts=PTS-STARTPTS+clip.start/TB`). Without that offset
+    // every clip's frames are at PTS 0..trimDuration, so when the output is
+    // at t=clip.start the overlay filter has already exhausted the clip and
+    // freezes on the last frame for the entire enable window.
+    for (const { clip, asset, inputIdx, kind } of clipInputs) {
+      if (kind !== 'video') continue;
+
+      // Defensive trim bounds: prefer the clip's explicit out, fall back to
+      // asset duration, then to clip.duration. Whatever we end up with must
+      // be a finite positive number — otherwise ffmpeg gets `trim=0:NaN` and
+      // silently drops the clip from the chain.
+      const inPoint = Number.isFinite(clip.inPoint) ? clip.inPoint : 0;
+      let outPoint = Number.isFinite(clip.outPoint) ? clip.outPoint : (Number.isFinite(asset.duration) ? asset.duration : null);
+      if (!Number.isFinite(outPoint) || outPoint <= inPoint) {
+        outPoint = inPoint + (Number.isFinite(clip.duration) ? clip.duration : 1);
+        console.warn(`[${sessionId}] Clip ${clip.id.slice(0,8)} (${asset.filename}) had invalid outPoint, recovered with outPoint=${outPoint}`);
+      }
       const trimDuration = outPoint - inPoint;
 
-      let clipFilter = `[${idx}:v]`;
-
-      // Trim
-      clipFilter += `trim=${inPoint}:${outPoint},setpts=PTS-STARTPTS,`;
-
-      // Scale/fit to canvas
+      let clipFilter = `[${inputIdx}:v]`;
+      clipFilter += `trim=${inPoint}:${outPoint},setpts=PTS-STARTPTS+${clip.start}/TB,`;
       clipFilter += `scale=${settings.width}:${settings.height}:force_original_aspect_ratio=decrease,`;
       clipFilter += `pad=${settings.width}:${settings.height}:(ow-iw)/2:(oh-ih)/2`;
 
-      // Apply transform if present
       if (clip.transform) {
-        const { x = 0, y = 0, scale = 1, opacity = 1 } = clip.transform;
+        const { scale = 1 } = clip.transform;
         if (scale !== 1) {
           clipFilter += `,scale=iw*${scale}:ih*${scale}`;
         }
-        // Opacity is handled in overlay
       }
 
-      clipFilter += `[v${idx}]`;
+      clipFilter += `[v${inputIdx}]`;
       filterParts.push(clipFilter);
 
-      // Overlay onto base
       const overlayX = clip.transform?.x || `(W-w)/2`;
       const overlayY = clip.transform?.y || `(H-h)/2`;
       const enable = `between(t,${clip.start},${clip.start + trimDuration})`;
 
-      filterParts.push(`[${lastVideo}][v${idx}]overlay=x=${overlayX}:y=${overlayY}:enable='${enable}'[out${idx}]`);
-      lastVideo = `out${idx}`;
+      filterParts.push(`[${lastVideo}][v${inputIdx}]overlay=x=${overlayX}:y=${overlayY}:enable='${enable}'[out${inputIdx}]`);
+      lastVideo = `out${inputIdx}`;
     }
 
-    // Rename final output
-    filterParts.push(`[${lastVideo}]copy[vout]`);
+    // Burn captions onto the composite. We build a real .ass file with
+    // PlayResY = output height so all sizes (Fontsize, MarginV, Outline) are
+    // in actual output pixels. Caption data is posted from the React client
+    // on each render request — it's not persisted server-side.
+    const assBody = buildAssFromCaptions(clips, captions, settings);
+    let videoChainTail = lastVideo;
+    if (assBody) {
+      const assPath = join(session.dir, `render-captions-${Date.now()}.ass`);
+      writeFileSync(assPath, assBody, 'utf-8');
 
-    // Audio mixing
-    let audioFilter = '';
-    if (audioClips.length > 0) {
-      const audioInputs = [];
-      for (const clip of audioClips) {
-        const asset = session.assets.get(clip.assetId);
-        if (!asset) continue;
+      // ffmpeg's `subtitles` filter parser is quoted-arg sensitive — escape
+      // colons in the path so it isn't read as a key=value separator.
+      const escapedPath = assPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+      filterParts.push(`[${videoChainTail}]subtitles='${escapedPath}'[vcaptioned]`);
+      videoChainTail = 'vcaptioned';
+      console.log(`[${sessionId}] Captions: ${assBody.split('\nDialogue:').length - 1} lines burned in`);
+    }
 
-        inputs.push('-i', asset.path);
-        const idx = inputIndex++;
-        const inPoint = clip.inPoint || 0;
-        const outPoint = clip.outPoint || asset.duration;
+    filterParts.push(`[${videoChainTail}]copy[vout]`);
 
-        audioInputs.push(`[${idx}:a]atrim=${inPoint}:${outPoint},asetpts=PTS-STARTPTS,adelay=${Math.floor(clip.start * 1000)}|${Math.floor(clip.start * 1000)}[a${idx}]`);
-      }
+    // Build audio: only V1 video audio + dedicated A1/A2 audio. V2/V3 video
+    // overlays (b-roll, gifs, animations) are MUTED in the editor preview
+    // (VideoPreview.tsx renders overlay videos with `muted`), so the export
+    // matches that — otherwise every overlay's background noise leaks into
+    // the final mix.
+    const audioStreams = [];
+    for (const { clip, asset, inputIdx, kind } of clipInputs) {
+      if (kind === 'video' && clip.trackId !== 'V1') continue;
+      if (!hasAudioStream(asset.path)) continue;
+      const inPoint = clip.inPoint || 0;
+      const outPoint = clip.outPoint || asset.duration;
+      const delayMs = Math.max(0, Math.floor(clip.start * 1000));
+      filterParts.push(
+        `[${inputIdx}:a]atrim=${inPoint}:${outPoint},asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[aud${inputIdx}]`
+      );
+      audioStreams.push(`[aud${inputIdx}]`);
+    }
 
-      if (audioInputs.length > 0) {
-        filterParts.push(...audioInputs);
-        const audioMix = audioInputs.map((_, i) => `[a${clips.indexOf(audioClips[i]) + videoClips.length}]`).join('');
-        filterParts.push(`${audioMix}amix=inputs=${audioInputs.length}[aout]`);
-        audioFilter = '-map [aout]';
-      }
+    let hasAudioOutput = false;
+    if (audioStreams.length > 0) {
+      filterParts.push(
+        `${audioStreams.join('')}amix=inputs=${audioStreams.length}:dropout_transition=0:normalize=0[aout]`
+      );
+      hasAudioOutput = true;
     }
 
     // Build final command
@@ -2032,7 +2245,7 @@ async function handleProjectRender(req, res, sessionId) {
       '-map', '[vout]',
     ];
 
-    if (audioFilter) {
+    if (hasAudioOutput) {
       ffmpegArgs.push('-map', '[aout]');
     }
 
@@ -2084,7 +2297,6 @@ async function handleRenderDownload(req, res, sessionId, renderType) {
   }
 
   // Find the render file
-  const { readdirSync } = require('fs');
   const files = readdirSync(session.rendersDir);
 
   let renderFile;
@@ -7624,6 +7836,200 @@ async function handleProcessAsset(req, res, sessionId) {
   }
 }
 
+// ============== OBSIDIAN AGENT HANDLERS ==============
+
+// POST /session/:id/obsidian/search
+// Body: { query: string, limit?: number }
+// Returns ranked video matches from the CPI insforge DB.
+async function handleObsidianSearch(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    const body = await parseBody(req);
+    const { query, limit } = body;
+
+    if (!query || typeof query !== 'string' || !query.trim()) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'query is required' }));
+      return;
+    }
+
+    console.log(`[${sessionId}] [Obsidian] Search: "${query}" (limit=${limit || 10})`);
+
+    const results = await obsidianSearchVideos(query, limit || 10);
+
+    const enriched = results.map((r) => ({
+      ...r,
+      thumbnailUrl: r.hasLocalThumbnail ? `/obsidian/thumbnail/${encodeURIComponent(r.thumbnailSlug)}` : null,
+    }));
+
+    console.log(`[${sessionId}] [Obsidian] Returned ${enriched.length} matches`);
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ success: true, results: enriched }));
+
+  } catch (error) {
+    console.error(`[${sessionId}] [Obsidian] Search error:`, error);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
+// POST /session/:id/obsidian/import
+// Body: { videoIds: number[] }
+// Downloads each video from Dropbox into the session's assets dir and
+// registers them as regular session assets (like handleAssetUpload).
+async function handleObsidianImport(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    const body = await parseBody(req);
+    const { videoIds } = body;
+
+    if (!Array.isArray(videoIds) || videoIds.length === 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'videoIds array is required' }));
+      return;
+    }
+
+    console.log(`[${sessionId}] [Obsidian] Importing ${videoIds.length} video(s)`);
+
+    const { stat } = await import('fs/promises');
+    const imported = [];
+    const failed = [];
+
+    for (const videoId of videoIds) {
+      try {
+        const video = await obsidianGetVideoById(videoId);
+        if (!video) {
+          failed.push({ videoId, error: 'Video not found in DB' });
+          continue;
+        }
+        if (!video.drive_id) {
+          failed.push({ videoId, error: 'Video has no Dropbox ID' });
+          continue;
+        }
+        if (!video.drive_id.startsWith('id:')) {
+          failed.push({ videoId, error: 'Video is not sourced from Dropbox (legacy Google Drive entry)' });
+          continue;
+        }
+
+        const assetId = randomUUID();
+        const originalName = video.file_name || `obsidian-${videoId}.mp4`;
+        const ext = (originalName.split('.').pop() || 'mp4').toLowerCase();
+        const assetPath = join(session.assetsDir, `${assetId}.${ext}`);
+
+        console.log(`[${sessionId}] [Obsidian] Downloading ${video.file_name} from Dropbox...`);
+        await obsidianDownloadFromDropbox(video.drive_id, assetPath);
+
+        const stats = await stat(assetPath);
+        const info = await getMediaInfo(assetPath);
+
+        // Generate thumbnail. Prefer the pre-rendered vault thumbnail (fast)
+        // if it exists; otherwise render one via ffmpeg.
+        const thumbPath = join(session.assetsDir, `${assetId}_thumb.jpg`);
+        const vaultThumb = obsidianGetThumbnailPath(obsidianSlugFromSummary(video.summary, video.file_name));
+        if (existsSync(vaultThumb)) {
+          try {
+            const { copyFile } = await import('fs/promises');
+            await copyFile(vaultThumb, thumbPath);
+          } catch {
+            try { await generateThumbnail(assetPath, thumbPath, false); } catch (e) { console.warn(`[${sessionId}] thumb gen failed: ${e.message}`); }
+          }
+        } else {
+          try { await generateThumbnail(assetPath, thumbPath, false); } catch (e) { console.warn(`[${sessionId}] thumb gen failed: ${e.message}`); }
+        }
+
+        const asset = {
+          id: assetId,
+          type: 'video',
+          filename: originalName,
+          path: assetPath,
+          thumbPath: existsSync(thumbPath) ? thumbPath : null,
+          duration: info.duration || 0,
+          size: stats.size,
+          width: info.width || 0,
+          height: info.height || 0,
+          createdAt: Date.now(),
+          obsidianVideoId: videoId,
+        };
+
+        session.assets.set(assetId, asset);
+
+        imported.push({
+          id: assetId,
+          type: 'video',
+          filename: originalName,
+          duration: asset.duration,
+          size: asset.size,
+          width: asset.width,
+          height: asset.height,
+          thumbnailUrl: asset.thumbPath ? `/session/${sessionId}/assets/${assetId}/thumbnail` : null,
+          streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
+          obsidianVideoId: videoId,
+        });
+
+        console.log(`[${sessionId}] [Obsidian] Imported ${originalName} as asset ${assetId}`);
+      } catch (err) {
+        console.error(`[${sessionId}] [Obsidian] Import failed for video ${videoId}:`, err.message);
+        failed.push({ videoId, error: err.message });
+      }
+    }
+
+    if (imported.length > 0) {
+      saveAssetMetadata(session);
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ success: true, imported, failed }));
+
+  } catch (error) {
+    console.error(`[${sessionId}] [Obsidian] Import error:`, error);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
+// GET /obsidian/thumbnail/:slug
+// Serves a pre-rendered thumbnail from the CPI vault attachments dir.
+async function handleObsidianThumbnail(req, res, slug) {
+  try {
+    const decoded = decodeURIComponent(slug);
+    // Guard against path traversal.
+    if (decoded.includes('..') || decoded.includes('/') || decoded.includes('\\')) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Invalid slug' }));
+      return;
+    }
+    const thumbPath = obsidianGetThumbnailPath(decoded);
+    if (!existsSync(thumbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Thumbnail not found' }));
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'image/jpeg',
+      'Cache-Control': 'public, max-age=3600',
+      'Access-Control-Allow-Origin': '*',
+    });
+    createReadStream(thumbPath).pipe(res);
+  } catch (error) {
+    console.error('[Obsidian] Thumbnail error:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
 // ============== SERVER ==============
 
 const server = http.createServer(async (req, res) => {
@@ -7753,6 +8159,14 @@ const server = http.createServer(async (req, res) => {
     else if (req.method === 'POST' && action === 'process-asset') {
       await handleProcessAsset(req, res, sessionId);
     }
+    // Obsidian agent: search the CPI knowledge base
+    else if (req.method === 'POST' && action === 'obsidian/search') {
+      await handleObsidianSearch(req, res, sessionId);
+    }
+    // Obsidian agent: import selected videos from Dropbox into session
+    else if (req.method === 'POST' && action === 'obsidian/import') {
+      await handleObsidianImport(req, res, sessionId);
+    }
     // Extract audio from video (creates audio asset + muted video)
     else if (req.method === 'POST' && action === 'extract-audio') {
       await handleExtractAudio(req, res, sessionId);
@@ -7792,6 +8206,13 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Session endpoint not found' }));
     }
+    return;
+  }
+
+  // Obsidian vault thumbnails (non-session-scoped)
+  const obsidianThumbMatch = path.match(/^\/obsidian\/thumbnail\/(.+)$/);
+  if (obsidianThumbMatch && req.method === 'GET') {
+    await handleObsidianThumbnail(req, res, obsidianThumbMatch[1]);
     return;
   }
 

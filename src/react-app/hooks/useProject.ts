@@ -166,11 +166,15 @@ export function useProject() {
   const tracksRef = useRef(tracks);
   const clipsRef = useRef(clips);
   const settingsRef = useRef(settings);
+  const captionDataRef = useRef<Record<string, CaptionData>>({});
+  const timelineTabsRef = useRef<TimelineTab[]>([]);
 
   // Keep refs in sync with state
   useEffect(() => { tracksRef.current = tracks; }, [tracks]);
   useEffect(() => { clipsRef.current = clips; }, [clips]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
+  useEffect(() => { captionDataRef.current = captionData; }, [captionData]);
+  useEffect(() => { timelineTabsRef.current = timelineTabs; }, [timelineTabs]);
 
   // Wrapper to persist session to localStorage
   const setSession = useCallback((sessionOrUpdater: SessionInfo | null | ((prev: SessionInfo | null) => SessionInfo | null)) => {
@@ -741,6 +745,7 @@ export function useProject() {
             tracks: tracksRef.current,
             clips: clipsRef.current,
             settings: settingsRef.current,
+            timelineTabs: timelineTabsRef.current,
           }),
         });
         console.log('[Project] Saved');
@@ -796,6 +801,15 @@ export function useProject() {
         // Server tracks may be outdated (e.g., missing T1, V3, A2)
         if (data.clips) setClips(data.clips);
         if (data.settings) setSettings(data.settings);
+        // Restore edit tabs (animations being edited in a separate tab).
+        // The 'main' tab is hard-coded in initial state and never persisted.
+        if (Array.isArray(data.timelineTabs) && data.timelineTabs.length > 0) {
+          setTimelineTabs(prev => {
+            const main = prev.find(t => t.id === 'main') || prev[0];
+            const restored = data.timelineTabs.filter((t: TimelineTab) => t.id !== 'main');
+            return main ? [main, ...restored] : restored;
+          });
+        }
       }
     } catch (error) {
       console.error('[Project] Load failed:', error);
@@ -819,13 +833,14 @@ export function useProject() {
           tracks: tracksRef.current,
           clips: clipsRef.current,
           settings: settingsRef.current,
+          timelineTabs: timelineTabsRef.current,
         }),
       });
 
       const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/render`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preview }),
+        body: JSON.stringify({ preview, captions: captionDataRef.current }),
       });
 
       if (!response.ok) {
@@ -904,6 +919,28 @@ export function useProject() {
     }
   }, [session]);
 
+  // Ensure a real server session exists; create one if needed. Returns the sessionId.
+  // Used by agents (e.g. Obsidian) that need to interact with the server before
+  // the user has uploaded their first asset.
+  const ensureSession = useCallback(async (): Promise<string> => {
+    if (session?.sessionId) return session.sessionId;
+
+    const createResponse = await fetch(`${LOCAL_FFMPEG_URL}/session/create`, {
+      method: 'POST',
+    });
+    if (!createResponse.ok) {
+      const error = await createResponse.json().catch(() => ({}));
+      throw new Error(error.error || 'Failed to create session');
+    }
+    const createResult = await createResponse.json();
+    const newSession: SessionInfo = {
+      sessionId: createResult.sessionId,
+      createdAt: Date.now(),
+    };
+    setSession(newSession);
+    return newSession.sessionId;
+  }, [session]);
+
   // Close session
   const closeSession = useCallback(async (): Promise<void> => {
     if (session) {
@@ -940,6 +977,7 @@ export function useProject() {
     // Session
     checkServer,
     createSession,
+    ensureSession,
     closeSession,
 
     // Assets
