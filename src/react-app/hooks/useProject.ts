@@ -920,8 +920,8 @@ export function useProject() {
   }, [session]);
 
   // Ensure a real server session exists; create one if needed. Returns the sessionId.
-  // Used by agents (e.g. Obsidian) that need to interact with the server before
-  // the user has uploaded their first asset.
+  // Used by agents that need to interact with the server before the user has
+  // uploaded their first asset.
   const ensureSession = useCallback(async (): Promise<string> => {
     if (session?.sessionId) return session.sessionId;
 

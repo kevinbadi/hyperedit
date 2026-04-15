@@ -7,14 +7,13 @@ import CaptionPropertiesPanel from '@/react-app/components/CaptionPropertiesPane
 import AIPromptPanel from '@/react-app/components/AIPromptPanel';
 import PicassoPanel from '@/react-app/components/PicassoPanel';
 import DiCaprioPanel from '@/react-app/components/DiCaprioPanel';
-import ObsidianPanel from '@/react-app/components/ObsidianPanel';
 import GifSearchPanel from '@/react-app/components/GifSearchPanel';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
 import TimelineTabs from '@/react-app/components/TimelineTabs';
 import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks/useProject';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
-import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film, Database } from 'lucide-react';
+import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
 import type { TemplateId } from '@/remotion/templates';
 
 interface ChapterData {
@@ -34,7 +33,7 @@ export default function Home() {
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
   const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16'>('16:9');
   const [autoSnap, setAutoSnap] = useState(true); // Ripple delete mode - shift clips when deleting
-  const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio' | 'obsidian'>('director');
+  const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
@@ -50,7 +49,6 @@ export default function Home() {
     loading,
     status,
     checkServer,
-    ensureSession,
     uploadAsset,
     deleteAsset,
     getAssetStreamUrl,
@@ -1908,7 +1906,7 @@ export default function Home() {
           side="right"
         >
           <div className="h-full flex flex-col bg-zinc-900/80 backdrop-blur-sm">
-            {/* Agent Tabs — order: Director, Obsidian, DiCaprio, Picasso */}
+            {/* Agent Tabs — order: Director, DiCaprio, Picasso */}
             <div className="flex items-center gap-1 px-2 border-b border-zinc-800/50">
               <button
                 onClick={() => setActiveAgent('director')}
@@ -1920,17 +1918,6 @@ export default function Home() {
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 Director
-              </button>
-              <button
-                onClick={() => setActiveAgent('obsidian')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
-                  activeAgent === 'obsidian'
-                    ? 'text-[#39FF14] border-b-2 border-[#39FF14] bg-zinc-800/30 drop-shadow-[0_0_4px_rgba(57,255,20,0.6)]'
-                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                }`}
-              >
-                <Database className="w-3.5 h-3.5" />
-                Obsidian
               </button>
               <button
                 onClick={() => setActiveAgent('dicaprio')}
@@ -2007,12 +1994,6 @@ export default function Home() {
                   onVideoGenerated={(assetId) => {
                     console.log('Video generated:', assetId);
                   }}
-                  onRefreshAssets={refreshAssets}
-                />
-              </div>
-              <div className={`absolute inset-0 ${activeAgent === 'obsidian' ? '' : 'hidden'}`}>
-                <ObsidianPanel
-                  ensureSession={ensureSession}
                   onRefreshAssets={refreshAssets}
                 />
               </div>
