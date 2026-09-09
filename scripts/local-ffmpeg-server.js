@@ -211,6 +211,8 @@ function restoreSessionsFromDisk() {
           sceneCount: savedMeta.sceneCount,
           sceneDataPath: savedMeta.sceneDataPath,
           editCount: savedMeta.editCount || 0,
+          sourceAssetId: savedMeta.sourceAssetId,
+          shortMeta: savedMeta.shortMeta,
           duration,
           width,
           height,
@@ -272,6 +274,9 @@ function saveAssetMetadata(session) {
       sceneCount: asset.sceneCount,
       sceneDataPath: asset.sceneDataPath,
       editCount: asset.editCount || 0,
+      // Shorts generator metadata
+      sourceAssetId: asset.sourceAssetId,
+      shortMeta: asset.shortMeta,
     };
   }
 
@@ -1743,6 +1748,8 @@ function handleAssetList(req, res, sessionId) {
     height: asset.height,
     thumbnailUrl: asset.thumbPath ? `/session/${sessionId}/assets/${asset.id}/thumbnail` : null,
     aiGenerated: asset.aiGenerated || false, // True for Remotion-generated animations
+    sourceAssetId: asset.sourceAssetId,
+    shortMeta: asset.shortMeta, // Present on clips produced by the Shorts generator
   }));
 
   res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -8216,6 +8223,442 @@ If the request is ambiguous, unsafe, or the timeline is empty when a render is n
   console.log(`[${logId}] === CREATOR OS: CHAT COMPLETE (${job.steps.length} step(s)) ===\n`);
 }
 
+// ============================================================================
+// Shorts Generator — find the most viral moments in a long video and cut them
+// into ready-to-post vertical shorts. Built in-house on top of the existing
+// transcription (getOrTranscribeVideo) + FFmpeg helpers. Pipeline:
+//   transcribe → Claude classifies + ranks highlight spans → snap to word
+//   boundaries → dedupe overlaps → top-N → FFmpeg cut + reframe (+ hook
+//   overlay) → register each clip as a session asset with `shortMeta`.
+// Long-running, so it follows the same start/poll job pattern as CreatorOS.
+// ============================================================================
+
+const shortsJobs = new Map();
+
+const SHORTS_RATIOS = {
+  '9:16': { width: 1080, height: 1920 },
+  '4:5': { width: 1080, height: 1350 },
+  '1:1': { width: 1080, height: 1080 },
+  '16:9': { width: 1920, height: 1080 },
+};
+
+const SHORTS_HOOK_FONTS = [
+  '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+  '/System/Library/Fonts/Supplemental/Impact.ttf',
+  '/Library/Fonts/Arial Bold.ttf',
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+];
+
+function findShortsHookFont() {
+  return SHORTS_HOOK_FONTS.find(p => existsSync(p)) || null;
+}
+
+// Group word timestamps into short timestamped lines so Claude can reason
+// over text but we can still cut by exact time. A new line starts on a pause
+// (> 0.7s) or every ~14 words.
+function formatTranscriptForRanking(words) {
+  const lines = [];
+  let current = [];
+  const flush = () => {
+    if (current.length === 0) return;
+    const start = current[0].start;
+    const end = current[current.length - 1].end;
+    lines.push(`[${start.toFixed(1)}-${end.toFixed(1)}] ${current.map(w => w.text).join(' ')}`);
+    current = [];
+  };
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const prev = words[i - 1];
+    if (prev && (w.start - prev.end > 0.7 || current.length >= 14)) flush();
+    current.push(w);
+  }
+  flush();
+  return lines.join('\n');
+}
+
+function isSentenceEnd(word) {
+  return /[.!?]["')\]]*$/.test(word.text || '');
+}
+
+// Move a candidate's rough start/end onto real word boundaries, preferring
+// natural sentence breaks within a tolerance window.
+function snapCandidateToWords(candidate, words, totalDuration, minDur, maxDur) {
+  if (!words.length) return candidate;
+  const tol = 2.0;
+
+  let bestStartIdx = -1;
+  let bestStartDist = Infinity;
+  for (let i = 0; i < words.length; i++) {
+    const dist = Math.abs(words[i].start - candidate.start);
+    if (dist > tol) continue;
+    const prev = words[i - 1];
+    const naturalBreak = !prev || isSentenceEnd(prev) || words[i].start - prev.end > 0.4;
+    const weighted = naturalBreak ? dist : dist + 1.5;
+    if (weighted < bestStartDist) { bestStartDist = weighted; bestStartIdx = i; }
+  }
+  if (bestStartIdx === -1) {
+    bestStartIdx = words.findIndex(w => w.start >= candidate.start);
+    if (bestStartIdx === -1) bestStartIdx = 0;
+  }
+
+  let bestEndIdx = -1;
+  let bestEndDist = Infinity;
+  for (let i = bestStartIdx; i < words.length; i++) {
+    const dist = Math.abs(words[i].end - candidate.end);
+    if (words[i].end > candidate.end + tol) break;
+    if (dist > tol) continue;
+    const next = words[i + 1];
+    const naturalBreak = !next || isSentenceEnd(words[i]) || next.start - words[i].end > 0.4;
+    const weighted = naturalBreak ? dist : dist + 1.5;
+    if (weighted < bestEndDist) { bestEndDist = weighted; bestEndIdx = i; }
+  }
+  if (bestEndIdx === -1) {
+    for (let i = words.length - 1; i >= bestStartIdx; i--) {
+      if (words[i].end <= candidate.end) { bestEndIdx = i; break; }
+    }
+    if (bestEndIdx === -1) bestEndIdx = bestStartIdx;
+  }
+
+  let start = Math.max(0, words[bestStartIdx].start - 0.15);
+  let end = Math.min(totalDuration, words[bestEndIdx].end + 0.4);
+
+  // Too long: walk the end back to the last sentence end that fits.
+  if (end - start > maxDur) {
+    let cut = -1;
+    for (let i = bestEndIdx; i > bestStartIdx; i--) {
+      if (words[i].end - start <= maxDur - 0.4 && isSentenceEnd(words[i])) { cut = i; break; }
+    }
+    if (cut === -1) {
+      for (let i = bestEndIdx; i > bestStartIdx; i--) {
+        if (words[i].end - start <= maxDur - 0.4) { cut = i; break; }
+      }
+    }
+    if (cut !== -1) end = Math.min(totalDuration, words[cut].end + 0.4);
+    else end = start + maxDur;
+  }
+
+  return { ...candidate, start, end, duration: end - start, tooShort: end - start < minDur };
+}
+
+function dedupeCandidates(candidates, maxOverlapRatio = 0.25) {
+  const sorted = [...candidates].sort((a, b) => b.score - a.score);
+  const accepted = [];
+  for (const c of sorted) {
+    const clashes = accepted.some(a => {
+      const overlap = Math.min(a.end, c.end) - Math.max(a.start, c.start);
+      if (overlap <= 0) return false;
+      const shorter = Math.min(a.end - a.start, c.end - c.start);
+      return overlap / shorter > maxOverlapRatio;
+    });
+    if (!clashes) accepted.push(c);
+  }
+  return accepted;
+}
+
+async function rankHighlightsWithClaude(apiKey, transcriptLines, totalDuration, opts) {
+  const { count, minDur, maxDur, hook } = opts;
+  const system = `You are an expert short-form video editor who finds the moments in long videos that go viral as TikToks, Reels and Shorts. You are precise about timestamps.
+
+You will receive a transcript where every line is prefixed with its [start-end] time in seconds. Do two things:
+
+1. Classify the video: contentType (one of: podcast, interview, tutorial, lecture, vlog, commentary, storytelling, comedy, news, product-demo, other) and pacing (slow, medium, fast).
+
+2. Find the ${Math.max(count * 3, 8)} strongest self-contained highlight spans. Each must be ${minDur}-${maxDur} seconds long, start at the beginning of a thought and end at a natural stopping point so it makes sense with zero context. Score 0-100 using this virality framework, weighted for the detected content type:
+- Hook strength: the first sentence stops a scroll on its own
+- Emotional peak: laughter, anger, awe, vulnerability
+- Opinion bomb: a strong, contrarian or surprising claim
+- Revelation: a fact, number or reveal the viewer didn't expect
+- Conflict or tension: disagreement, challenge, stakes
+- Quotable: a line people will repeat or screenshot
+- Story peak: the climax or punchline of an anecdote
+- Practical value: a concrete tip the viewer can use today
+Penalise spans that rely on visuals you cannot see, that reference earlier context, or that are rambling.
+
+${hook ? 'For each span also write a "hook": an on-screen title of at most 7 words that makes someone stop scrolling. Curiosity gap, bold claim or direct address. No hashtags, no emoji, no quotation marks.' : 'Set "hook" to an empty string.'}
+
+Return ONLY a JSON object, no prose, no markdown fences:
+{"contentType":"...","pacing":"...","candidates":[{"start":12.3,"end":41.8,"score":88,"title":"3-6 word label","hook":"...","reason":"one sentence"}]}
+Timestamps must be taken from the transcript line prefixes. Total video duration is ${totalDuration.toFixed(1)} seconds.`;
+
+  const text = await callClaude(apiKey, system, `TRANSCRIPT:\n${transcriptLines}`, 6000);
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error(`Claude returned no JSON: ${text.slice(0, 200)}`);
+    parsed = JSON.parse(match[0]);
+  }
+  const candidates = (parsed.candidates || [])
+    .map(c => ({
+      start: Number(c.start),
+      end: Number(c.end),
+      score: Math.max(0, Math.min(100, Math.round(Number(c.score) || 0))),
+      title: String(c.title || '').trim() || 'Highlight',
+      hook: String(c.hook || '').trim().replace(/^["']|["']$/g, ''),
+      reason: String(c.reason || '').trim(),
+    }))
+    .filter(c => Number.isFinite(c.start) && Number.isFinite(c.end) && c.end > c.start);
+  return { contentType: parsed.contentType || 'other', pacing: parsed.pacing || 'medium', candidates };
+}
+
+// Wrap hook text into at most three short lines. Each line is drawn by its
+// own drawtext filter: FFmpeg 8's drawtext renders a missing-glyph box for
+// embedded newlines, so multi-line text can't go through one textfile.
+function wrapHookText(hook, maxChars = 22) {
+  const words = hook.split(/\s+/).filter(Boolean);
+  const lines = [];
+  let cur = '';
+  for (const w of words) {
+    if ((cur + ' ' + w).trim().length > maxChars && cur) { lines.push(cur); cur = w; }
+    else cur = (cur + ' ' + w).trim();
+  }
+  if (cur) lines.push(cur);
+  return lines.slice(0, 3);
+}
+
+function buildShortsVideoFilter({ width, height, cropPosition, hookTextFiles = [], fontFile }) {
+  const R = (width / height).toFixed(6);
+  const cropW = `if(gt(iw/ih\\,${R})\\,ih*${R}\\,iw)`;
+  const cropH = `if(gt(iw/ih\\,${R})\\,ih\\,iw/${R})`;
+  const x = cropPosition === 'left' ? '0' : cropPosition === 'right' ? 'iw-ow' : '(iw-ow)/2';
+  const y = '(ih-oh)/2';
+  const filters = [
+    `crop=${cropW}:${cropH}:${x}:${y}`,
+    `scale=${width}:${height}:flags=lanczos`,
+  ];
+  if (fontFile && hookTextFiles.length > 0) {
+    const fontSize = Math.round(height / 22);
+    const lineHeight = Math.round(fontSize * 1.45);
+    const top = Math.round(height * 0.16);
+    hookTextFiles.forEach((file, i) => {
+      filters.push(
+        `drawtext=textfile='${file}':fontfile='${fontFile}'` +
+        `:fontsize=${fontSize}:fontcolor=white` +
+        `:borderw=3:bordercolor=black@0.9:box=1:boxcolor=black@0.45:boxborderw=14` +
+        `:x=(w-text_w)/2:y=${top + i * lineHeight}:enable=lt(t\\,3)`
+      );
+    });
+  }
+  return filters.join(',');
+}
+
+async function handleShortsStart(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  if (!anthropicApiKey) {
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'ANTHROPIC_API_KEY not configured in .dev.vars — required to rank highlights.' }));
+    return;
+  }
+
+  try {
+    const body = await parseBody(req);
+    const count = Math.max(1, Math.min(8, parseInt(body.count) || 3));
+    const ratio = SHORTS_RATIOS[body.ratio] ? body.ratio : '9:16';
+    const minDur = Math.max(5, Number(body.minDuration) || 20);
+    const maxDur = Math.max(minDur + 5, Number(body.maxDuration) || 60);
+    const hook = body.hook !== false;
+    const cropPosition = ['left', 'center', 'right'].includes(body.cropPosition) ? body.cropPosition : 'center';
+
+    let videoAsset = body.assetId ? session.assets.get(body.assetId) : null;
+    if (!videoAsset) {
+      for (const asset of session.assets.values()) {
+        if (asset.type === 'video' && !asset.aiGenerated && !asset.shortMeta) { videoAsset = asset; break; }
+      }
+    }
+    if (!videoAsset || videoAsset.type !== 'video') {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'No source video found. Upload a video first.' }));
+      return;
+    }
+
+    const jobId = randomUUID();
+    const job = {
+      status: 'running',
+      stage: 'transcribe',
+      message: 'Transcribing…',
+      steps: [{ label: `Transcribe ${videoAsset.filename}`, status: 'running' }],
+      sourceAssetId: videoAsset.id,
+      clips: [],
+    };
+    shortsJobs.set(jobId, job);
+
+    runShortsJob(session, videoAsset, jobId, { count, ratio, minDur, maxDur, hook, cropPosition }, anthropicApiKey)
+      .catch(err => {
+        job.status = 'error';
+        job.error = err.message;
+        const running = job.steps.find(s => s.status === 'running');
+        if (running) running.status = 'error';
+        console.error(`[${sessionId.substring(0, 8)}] Shorts job error:`, err.message);
+      });
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ jobId }));
+  } catch (error) {
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
+function handleShortsStatus(req, res, jobId) {
+  const job = shortsJobs.get(jobId);
+  if (!job) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Job not found' }));
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify(job));
+  if (job.status === 'complete' || job.status === 'error') {
+    // Keep finished jobs around briefly so a poll that races the final write still sees it.
+    setTimeout(() => shortsJobs.delete(jobId), 60_000);
+  }
+}
+
+async function runShortsJob(session, videoAsset, jobId, opts, anthropicApiKey) {
+  const job = shortsJobs.get(jobId);
+  const logId = session.id.substring(0, 8);
+  const { count, ratio, minDur, maxDur, hook, cropPosition } = opts;
+  const { width, height } = SHORTS_RATIOS[ratio];
+  const setStep = (idx, status) => { if (job.steps[idx]) job.steps[idx].status = status; };
+  const pushStep = (label) => job.steps.push({ label, status: 'running' }) - 1;
+
+  console.log(`\n[${logId}] === SHORTS GENERATOR ===`);
+  console.log(`[${logId}] Source: ${videoAsset.filename} | count=${count} ratio=${ratio} ${minDur}-${maxDur}s hook=${hook} crop=${cropPosition}`);
+
+  // 1. Transcribe (cached per asset)
+  const totalDuration = await getVideoDuration(videoAsset.path);
+  const transcript = await getOrTranscribeVideo(session, videoAsset, `${logId}-shorts`);
+  const words = (transcript.words || [])
+    .map(w => ({ text: String(w.text ?? w.word ?? '').trim(), start: Number(w.start), end: Number(w.end) }))
+    .filter(w => w.text && Number.isFinite(w.start) && Number.isFinite(w.end));
+  if (words.length < 20) {
+    throw new Error('Not enough speech in this video to find highlights (need a talking video with at least a few sentences).');
+  }
+  setStep(0, 'done');
+  job.steps[0].label = `Transcribed ${words.length} words (${Math.round(totalDuration)}s)`;
+
+  // 2. Classify + rank with Claude
+  job.stage = 'rank';
+  job.message = 'Finding the best moments…';
+  const rankIdx = pushStep('Rank highlights with Claude');
+  const transcriptLines = formatTranscriptForRanking(words);
+  const ranked = await rankHighlightsWithClaude(anthropicApiKey, transcriptLines, totalDuration, { count, minDur, maxDur, hook });
+  job.contentType = ranked.contentType;
+  job.pacing = ranked.pacing;
+  console.log(`[${logId}] Content type: ${ranked.contentType} (${ranked.pacing}) — ${ranked.candidates.length} candidates`);
+  if (ranked.candidates.length === 0) throw new Error('Claude did not return any highlight candidates.');
+  setStep(rankIdx, 'done');
+  job.steps[rankIdx].label = `Ranked ${ranked.candidates.length} candidates (${ranked.contentType}, ${ranked.pacing} pacing)`;
+
+  // 3. Snap to word boundaries, dedupe, take top N
+  const snapped = ranked.candidates
+    .map(c => snapCandidateToWords(c, words, totalDuration, minDur, maxDur))
+    .filter(c => !c.tooShort && c.duration >= 5);
+  const selected = dedupeCandidates(snapped).slice(0, count);
+  if (selected.length === 0) throw new Error('No candidates survived the length constraints. Try a wider duration range.');
+  job.steps.push({ label: `Selected top ${selected.length} after dedupe`, status: 'done' });
+
+  // 4. Cut + reframe each clip
+  job.stage = 'render';
+  const fontFile = hook ? findShortsHookFont() : null;
+  if (hook && !fontFile) console.warn(`[${logId}] No font found for hook overlay — skipping burn-in`);
+
+  for (let i = 0; i < selected.length; i++) {
+    const c = selected[i];
+    job.message = `Cutting short ${i + 1} of ${selected.length}…`;
+    const stepIdx = pushStep(`Cut #${i + 1} "${c.title}" (${c.start.toFixed(1)}s → ${c.end.toFixed(1)}s, score ${c.score})`);
+
+    const assetId = randomUUID();
+    const outPath = join(session.assetsDir, `${assetId}.mp4`);
+    const thumbPath = join(session.assetsDir, `${assetId}_thumb.jpg`);
+    const hookTextFiles = [];
+    if (hook && fontFile && c.hook) {
+      wrapHookText(c.hook).forEach((line, li) => {
+        const file = join(TEMP_DIR, `${assetId}-hook-${li}.txt`);
+        writeFileSync(file, line);
+        hookTextFiles.push(file);
+      });
+    }
+
+    try {
+      await runFFmpeg([
+        '-y',
+        '-ss', c.start.toFixed(3),
+        '-i', videoAsset.path,
+        '-t', c.duration.toFixed(3),
+        '-vf', buildShortsVideoFilter({ width, height, cropPosition, hookTextFiles, fontFile }),
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac', '-b:a', '160k',
+        '-movflags', '+faststart',
+        outPath,
+      ], `${logId}-short${i + 1}`);
+    } finally {
+      for (const f of hookTextFiles) { try { unlinkSync(f); } catch {} }
+    }
+
+    try { await generateThumbnail(outPath, thumbPath); } catch (e) { console.warn(`[${logId}] Thumbnail failed: ${e.message}`); }
+
+    const { stat } = await import('fs/promises');
+    const stats = await stat(outPath);
+    let duration = c.duration;
+    try { duration = await getVideoDuration(outPath); } catch {}
+
+    const slug = c.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'highlight';
+    const asset = {
+      id: assetId,
+      type: 'video',
+      filename: `short-${i + 1}-${slug}.mp4`,
+      path: outPath,
+      thumbPath: existsSync(thumbPath) ? thumbPath : null,
+      duration,
+      size: stats.size,
+      width,
+      height,
+      createdAt: Date.now(),
+      aiGenerated: false,
+      sourceAssetId: videoAsset.id,
+      shortMeta: {
+        score: c.score,
+        title: c.title,
+        hook: c.hook,
+        hookBurnedIn: hookTextFiles.length > 0,
+        reason: c.reason,
+        sourceStart: c.start,
+        sourceEnd: c.end,
+        ratio,
+        contentType: ranked.contentType,
+      },
+    };
+    session.assets.set(assetId, asset);
+    saveAssetMetadata(session);
+
+    job.clips.push({
+      id: assetId,
+      filename: asset.filename,
+      duration,
+      width,
+      height,
+      streamUrl: `/session/${session.id}/assets/${assetId}/stream`,
+      thumbnailUrl: asset.thumbPath ? `/session/${session.id}/assets/${assetId}/thumbnail` : null,
+      shortMeta: asset.shortMeta,
+    });
+    setStep(stepIdx, 'done');
+    console.log(`[${logId}] ✓ Short ${i + 1}: ${asset.filename} (${duration.toFixed(1)}s, score ${c.score})`);
+  }
+
+  job.stage = 'done';
+  job.status = 'complete';
+  job.message = `Created ${job.clips.length} short${job.clips.length === 1 ? '' : 's'}`;
+  console.log(`[${logId}] === SHORTS GENERATOR COMPLETE (${job.clips.length} clips) ===\n`);
+}
+
 const server = http.createServer(async (req, res) => {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -8382,6 +8825,13 @@ const server = http.createServer(async (req, res) => {
     else if (req.method === 'GET' && action.startsWith('creatoros/chat/status/')) {
       handleCreatorOSChatStatus(req, res, action.substring('creatoros/chat/status/'.length));
     }
+    // Shorts generator (transcribe → Claude ranks highlights → FFmpeg cut + reframe)
+    else if (req.method === 'POST' && action === 'shorts/start') {
+      await handleShortsStart(req, res, sessionId);
+    }
+    else if (req.method === 'GET' && action.startsWith('shorts/status/')) {
+      handleShortsStatus(req, res, action.substring('shorts/status/'.length));
+    }
     else if (action.startsWith('renders/')) {
       const renderType = action.substring(8); // Remove 'renders/'
       if (req.method === 'GET') {
@@ -8449,5 +8899,8 @@ server.listen(PORT, () => {
   console.log(`   POST /session/:id/creatoros/init - Connect with a CreatorOS API key`);
   console.log(`   POST /session/:id/creatoros/chat/start - Start a natural-language social publishing job`);
   console.log(`   GET  /session/:id/creatoros/chat/status/:jobId - Poll live progress of a chat job`);
+  console.log(`\n   Shorts Generator API:`);
+  console.log(`   POST /session/:id/shorts/start - Find viral moments and cut vertical shorts`);
+  console.log(`   GET  /session/:id/shorts/status/:jobId - Poll shorts job progress + results`);
   console.log(`\n   GET /health - Health check\n`);
 });

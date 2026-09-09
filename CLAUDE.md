@@ -83,6 +83,7 @@ Key endpoints on `localhost:3333`:
 - `POST /session/{id}/generate-image` - fal.ai image generation (currently unused by the UI — Picasso agent was removed)
 - `POST /session/{id}/giphy/*` - GIPHY search/trending/add proxy
 - `POST /session/{id}/create-gif` - Animated GIF from image with motion effects
+- `POST /session/{id}/shorts/start` + `GET /session/{id}/shorts/status/{jobId}` - Shorts generator (see below)
 
 Sessions persist to `/tmp/hyperedit-ffmpeg/sessions/{sessionId}/` with assets, renders, project.json, and assets-meta.json (stores `aiGenerated`, `duration`, `editCount`).
 
@@ -116,10 +117,24 @@ Required in `.dev.vars` for local development:
 
 ## AI Agents
 
-The right panel has three AI agents accessible via tabs. All panels are always mounted but toggled with `hidden` CSS class to preserve chat state.
+The right panel has four tabs (three chat agents plus the Shorts generator). All panels are always mounted but toggled with `hidden` CSS class to preserve chat state.
 - **Director** (AIPromptPanel): Video editing commands, captions, motion graphics, animations
 - **DiCaprio** (DiCaprioPanel): Video generation with Animate Image (Kling v1.5), Restyle Video (LTX-2 19B), Remove Background (Bria)
 - **Creator OS** (CreatorOSPanel): Publishes the rendered timeline to social media
+- **Shorts** (ShortsPanel): Not a chat agent — a form that finds viral moments in a long video and cuts vertical shorts (see Shorts Generator below)
+
+### Shorts Generator (ShortsPanel)
+
+Fourth tab in the right panel (`ShortsPanel.tsx`). Finds the most viral moments in a long talking video and cuts them into ready-to-post vertical shorts. Built in-house — there is no third-party dependency (a GitHub "shorts generator" repo was evaluated and rejected as malware; do not vendor external code for this).
+
+Pipeline (`runShortsJob` in `scripts/local-ffmpeg-server.js`, start/poll job pattern like Creator OS):
+1. **Transcribe** via the shared `getOrTranscribeVideo()` (local Whisper, cached per asset in `session.transcriptCache`).
+2. **Rank** with Claude Sonnet 5 (`rankHighlightsWithClaude`, one call): classifies content type + pacing, returns ~3x `count` candidate spans scored 0–100 on a virality framework, plus a ≤7-word hook per span. Requires `ANTHROPIC_API_KEY`.
+3. **Snap** each candidate to real word boundaries preferring sentence ends (`snapCandidateToWords`), enforce min/max duration, **dedupe** overlapping spans by score (`dedupeCandidates`), take top N.
+4. **Cut + reframe** with FFmpeg: `crop` to the target ratio (`cropPosition` left/center/right), `scale` to 1080x1920 / 1080x1350 / 1080x1080, and burn the hook into the first 3s with `drawtext`. Each hook line is a separate `drawtext` filter — FFmpeg 8 renders a tofu box for embedded newlines, so never pass multi-line text to one drawtext.
+5. **Register** each clip as a session asset with `shortMeta` (score, title, hook, reason, source range, ratio) and `sourceAssetId`, persisted in `assets-meta.json` and exposed by `GET /assets`. The panel lists shorts from `assets.filter(a => a.shortMeta)`, so results survive reloads. "Add to timeline" (`handleAddShortToTimeline` in Home.tsx) appends the short to V1 on the main tab and flips the canvas to the short's aspect ratio.
+
+Source-video picker excludes `aiGenerated` assets and existing shorts. Needs a speaking video (fails with a clear error under 20 transcribed words).
 
 ### Creator OS Agent
 

@@ -7,13 +7,14 @@ import CaptionPropertiesPanel from '@/react-app/components/CaptionPropertiesPane
 import AIPromptPanel from '@/react-app/components/AIPromptPanel';
 import DiCaprioPanel from '@/react-app/components/DiCaprioPanel';
 import CreatorOSPanel from '@/react-app/components/CreatorOSPanel';
+import ShortsPanel from '@/react-app/components/ShortsPanel';
 import GifSearchPanel from '@/react-app/components/GifSearchPanel';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
 import TimelineTabs from '@/react-app/components/TimelineTabs';
 import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks/useProject';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
-import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Film, Rocket } from 'lucide-react';
+import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Film, Rocket, Scissors } from 'lucide-react';
 import type { TemplateId } from '@/remotion/templates';
 
 interface ChapterData {
@@ -33,7 +34,7 @@ export default function Home() {
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
   const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16'>('16:9');
   const [autoSnap, setAutoSnap] = useState(true); // Ripple delete mode - shift clips when deleting
-  const [activeAgent, setActiveAgent] = useState<'director' | 'dicaprio' | 'creatoros'>('director');
+  const [activeAgent, setActiveAgent] = useState<'director' | 'dicaprio' | 'creatoros' | 'shorts'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
@@ -487,6 +488,26 @@ export default function Home() {
       return newRatio;
     });
   }, [setSettings]);
+
+  // Shorts generator: drop a finished short onto V1 at the end of the main
+  // timeline, flipping the canvas to match its aspect ratio if needed.
+  const handleAddShortToTimeline = useCallback((assetId: string) => {
+    const asset = assets.find(a => a.id === assetId);
+    if (!asset) return;
+    if (activeTabId !== 'main') switchTimelineTab('main');
+
+    const isPortrait = (asset.height ?? 0) > (asset.width ?? 0);
+    if (asset.width && asset.height) {
+      setSettings(s => ({ ...s, width: asset.width!, height: asset.height! }));
+      setAspectRatio(isPortrait ? '9:16' : '16:9');
+    }
+
+    const v1End = clips
+      .filter(c => c.trackId === 'V1')
+      .reduce((max, c) => Math.max(max, c.start + c.duration), 0);
+    addClip(assetId, 'V1', v1End, asset.duration);
+    setTimeout(() => saveProject(), 100);
+  }, [assets, clips, activeTabId, switchTimelineTab, setSettings, addClip, saveProject]);
 
   // Handle selecting clip
   const handleSelectClip = useCallback((clipId: string | null) => {
@@ -1907,7 +1928,7 @@ export default function Home() {
           side="right"
         >
           <div className="h-full flex flex-col bg-zinc-900/80 backdrop-blur-sm">
-            {/* Agent Tabs — order: Director, DiCaprio, Creator OS */}
+            {/* Agent Tabs — order: Director, DiCaprio, Creator OS, Shorts */}
             <div className="flex items-center border-b border-zinc-800/50">
               <button
                 onClick={() => setActiveAgent('director')}
@@ -1941,6 +1962,17 @@ export default function Home() {
               >
                 <Rocket className="w-3.5 h-3.5" />
                 Creator OS
+              </button>
+              <button
+                onClick={() => setActiveAgent('shorts')}
+                className={`flex-1 flex items-center justify-center gap-1 px-1.5 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+                  activeAgent === 'shorts'
+                    ? 'text-zinc-200 border-b-2 border-zinc-300 bg-zinc-800/30'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
+                }`}
+              >
+                <Scissors className="w-3.5 h-3.5" />
+                Shorts
               </button>
             </div>
 
@@ -1991,6 +2023,14 @@ export default function Home() {
               </div>
               <div className={`absolute inset-0 ${activeAgent === 'creatoros' ? '' : 'hidden'}`}>
                 <CreatorOSPanel sessionId={session?.sessionId ?? null} ensureSession={ensureSession} />
+              </div>
+              <div className={`absolute inset-0 ${activeAgent === 'shorts' ? '' : 'hidden'}`}>
+                <ShortsPanel
+                  sessionId={session?.sessionId ?? null}
+                  assets={assets}
+                  onAddToTimeline={handleAddShortToTimeline}
+                  onRefreshAssets={refreshAssets}
+                />
               </div>
             </div>
           </div>
